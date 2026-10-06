@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Guard Demo Page</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px; color: #111; }
+    h1 { margin-bottom: 4px; }
+    .note { background: #eef2ff; border-radius: 8px; padding: 10px 14px; font-size: 14px; }
+    .sms { background: #f3f4f6; border-radius: 12px; padding: 12px 14px; margin: 10px 0; font-size: 15px; }
+    li { margin: 8px 0; }
+    code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>AI Guard demo</h1>
+  <p class="note">All links and messages below are FAKE test examples. Nothing here is a real site. Open the extension popup or just click the links to see the protection in action.</p>
+
+  <h2>1. Links</h2>
+  <ul>
+    <li><a href="https://www.wikipedia.org">Wikipedia (normal link, stays unmarked)</a></li>
+    <li><a href="https://paypa1.com/login">paypa1.com/login</a> - look-alike domain (orange outline)</li>
+    <li><a href="http://192.168.1.1/login">http://192.168.1.1/login</a> - raw IP login page (orange outline)</li>
+    <li><a href="https://bit.ly/secure-login-update">bit.ly shortened link</a> - hides its destination (orange outline)</li>
+    <li><a href="https://paypa1-secure-login.xyz/verify">www.paypal.com/signin</a> - link text lies about where it goes (click to see the BLOCK screen)</li>
+    <li><a href="https://g00gle-account-verify.xyz/">Sign in to Google</a> - brand imitation (click to see the BLOCK screen)</li>
+  </ul>
+
+  <h2>2. Scam messages</h2>
+  <p>The page text is scanned too. This page should show the red AI Guard banner. You can also copy a message into the extension popup and click Analyze.</p>
+  <div class="sms">Dear customer, your SBI KYC is pending. Update immediately or your account will be blocked. Share OTP to verify: http://sbi-kyc-update.top/login</div>
+  <div class="sms">Congratulations! You have won a lucky draw. To receive your cashback enter your UPI PIN here.</div>
+  <div class="sms">Your electricity bill is overdue and power will be disconnected tonight. Pay now: http://bit.ly/pay-bill</div>
+  <div class="sms">Work from home and earn 5000 per day. Part time job, no experience needed. Message us now.</div>
+
+  <h2>3. Email addresses</h2>
+  <ul>
+    <li>Contact: help@ai-guard.example (external, not verified)</li>
+    <li>Security: security@paypa1.example (look-alike domain)</li>
+    <li>Obfuscated: support [at] ai-guard [dot] example</li>
+  </ul>
+
+  <h2>4. A normal message (for contrast, paste it into the popup)</h2>
+  <div class="sms">Hey, are we still meeting for lunch tomorrow at 1?</div>
+</body>
+</html>

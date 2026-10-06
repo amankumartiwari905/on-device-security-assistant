@@ -1,0 +1,95 @@
+import { analyzeDomain } from '../domain/lookalike';
+import { getRegistrableDomain } from '../url/urlFeatures';
+import { DEFAULT_DETECTION_RULES } from '../url/rules';
+import type { DetectionRules } from '../url/rules';
+
+export type EmailStatus = 'matches-site' | 'suspicious' | 'external';
+
+export interface EmailAssessment {
+  address: string;
+  status: EmailStatus;
+  explanation: string;
+}
+
+const EMAIL_CANDIDATE = /[^\s<>()\[\]{}"',;]+@[^\s<>()\[\]{}"',;]+/g;
+const OBFUSCATED_EMAIL = /\b([a-z0-9.!#$%&'*+/=?^_`{|}~-]+)\s*(?:\[at\]|\(at\)|\{at\})\s*([a-z0-9.-]+(?:(?:\s*\[dot\]\s*|\s*\(dot\)\s*|\s*\{dot\}\s*)[a-z0-9-]+)+)/gi;
+
+function cleanCandidate(value: string): string {
+  return value.replace(/^[.,:;]+|[.,:;!?]+$/g, '');
+}
+
+function isValidAddress(address: string): boolean {
+  if (address.length > 254 || (address.match(/@/g) ?? []).length !== 1) return false;
+
+  const [local, rawDomain] = address.split('@');
+  if (!local || local.length > 64 || local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
+  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)) return false;
+
+  const domain = rawDomain.toLowerCase().replace(/\.$/, '');
+  const labels = domain.split('.');
+  return labels.length >= 2 && labels.every((label) =>
+    label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+  );
+}
+
+function assessAddress(
+  address: string,
+  pageHostname: string,
+  obfuscated: boolean,
+  rules: DetectionRules,
+): EmailAssessment {
+  const normalized = address.trim();
+  if (obfuscated) {
+    return { address: normalized, status: 'suspicious', explanation: 'This address is disguised with “at” or “dot” text.' };
+  }
+  if (!isValidAddress(normalized)) {
+    return { address: normalized, status: 'suspicious', explanation: 'This address does not have a valid email format.' };
+  }
+
+  const domain = normalized.slice(normalized.lastIndexOf('@') + 1).toLowerCase().replace(/\.$/, '');
+  const domainSignal = analyzeDomain(domain, rules).find((signal) =>
+    signal.id === 'homoglyph' || signal.id === 'typosquat' || signal.id === 'brand-wrong-domain' ||
+    signal.id === 'brand-in-domain' || signal.id === 'brand-in-subdomain',
+  );
+  if (domainSignal) {
+    return { address: normalized, status: 'suspicious', explanation: domainSignal.reason };
+  }
+
+  if (pageHostname && getRegistrableDomain(domain) === getRegistrableDomain(pageHostname)) {
+    return {
+      address: normalized,
+      status: 'matches-site',
+      explanation: 'The domain matches this website; the mailbox itself is not verified.',
+    };
+  }
+
+  return {
+    address: normalized,
+    status: 'external',
+    explanation: 'Valid-looking address on another domain; its owner and mailbox are unverified.',
+  };
+}
+
+export function analyzePageEmails(
+  sources: readonly string[],
+  pageHostname: string,
+  rules: DetectionRules = DEFAULT_DETECTION_RULES,
+): EmailAssessment[] {
+  const found = new Map<string, { address: string; obfuscated: boolean }>();
+
+  for (const source of sources) {
+    for (const match of source.matchAll(OBFUSCATED_EMAIL)) {
+      const local = match[1];
+      const domain = match[2].replace(/\s*(?:\[dot\]|\(dot\)|\{dot\})\s*/gi, '.');
+      const address = cleanCandidate(`${local}@${domain}`);
+      found.set(address.toLowerCase(), { address, obfuscated: true });
+    }
+
+    for (const match of source.matchAll(EMAIL_CANDIDATE)) {
+      const address = cleanCandidate(match[0]);
+      if (address) found.set(address.toLowerCase(), { address, obfuscated: false });
+    }
+  }
+
+  return [...found.values()].map(({ address, obfuscated }) => assessAddress(address, pageHostname, obfuscated, rules));
+}
