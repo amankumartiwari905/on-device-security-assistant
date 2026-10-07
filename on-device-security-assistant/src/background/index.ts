@@ -3,6 +3,7 @@ import { blockThreshold, getSettings } from '../storage/settings';
 import { getDetectionRules } from '../storage/detectionRules';
 import { addHistory } from '../storage/history';
 import type { Message } from '../shared/messages';
+import { routeMessageAnalysis } from './threatRouter';
 import { addAllowOnce, consumeAllowOnce } from './allowOnce';
 
 // Check every top-level navigation before the page loads.
@@ -42,6 +43,31 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
       .then((ok) => sendResponse({ ok }))
       .catch(() => sendResponse({ ok: false }));
     return true; // keep the channel open for the async response
+  }
+  if (msg.type === 'ANALYZE_MESSAGE') {
+    if (sender.id !== chrome.runtime.id || sender.tab !== undefined) {
+      sendResponse({ error: 'Message analysis is only available from the AI Guard popup.' });
+      return false;
+    }
+    if (typeof msg.text !== 'string' || msg.text.trim().length === 0 || msg.text.length > 20_000) {
+      sendResponse({ error: 'Enter a message under 20,000 characters to analyze.' });
+      return false;
+    }
+    if (msg.intent !== 'automatic' && msg.intent !== 'explain') {
+      sendResponse({ error: 'Choose a valid message analysis action.' });
+      return false;
+    }
+
+    void getDetectionRules()
+      .then((rules) => routeMessageAnalysis(msg.text, rules, msg.intent))
+      .then(sendResponse)
+      .catch((error: unknown) => {
+        console.error('[AI Guard] message analysis failed', error);
+        sendResponse({
+          error: error instanceof Error ? error.message : 'Could not analyze this message.',
+        });
+      });
+    return true;
   }
   if (msg.type === 'PAGE_VERDICT' && sender.tab?.id !== undefined) {
     const tabId = sender.tab.id;

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { scanText, scanUrl } from '../../engine';
+import { scanUrl } from '../../engine';
 import type { Verdict } from '../../engine';
 import { getSettings, saveSettings } from '../../storage/settings';
 import { getDetectionRules } from '../../storage/detectionRules';
 import { clearHistory, getHistory } from '../../storage/history';
 import type { HistoryItem } from '../../storage/history';
+import type { AnalyzeMessageResponse, ThreatExplanation } from '../../shared/messages';
 import { VerdictCard } from '../components/VerdictCard';
 
 function timeAgo(ms: number): string {
@@ -21,9 +22,12 @@ export function Popup() {
   const [pageVerdict, setPageVerdict] = useState<Verdict | null>(null);
   const [text, setText] = useState('');
   const [textVerdict, setTextVerdict] = useState<Verdict | null>(null);
+  const [textExplanation, setTextExplanation] = useState<ThreatExplanation | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [analyzingMessage, setAnalyzingMessage] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +81,32 @@ export function Popup() {
     setHistory([]);
   };
 
+  const analyzeMessage = async (intent: 'automatic' | 'explain') => {
+    setAnalyzingMessage(true);
+    setAnalysisStatus(intent === 'explain' ? 'Running local checks and asking Qwen for an explanation...' : 'Running local checks...');
+    if (intent === 'automatic') setTextVerdict(null);
+    setTextExplanation(null);
+    try {
+      const response: AnalyzeMessageResponse = await chrome.runtime.sendMessage({
+        type: 'ANALYZE_MESSAGE',
+        text,
+        intent,
+      });
+      if ('error' in response) {
+        setAnalysisStatus(response.error);
+      } else {
+        setTextVerdict(response.verdict);
+        setTextExplanation(response.explanation);
+        setAnalysisStatus(response.ollama.message);
+      }
+    } catch (error) {
+      console.error('[AI Guard] could not request message analysis', error);
+      setAnalysisStatus('Could not reach the AI Guard service worker. Reload the extension and try again.');
+    } finally {
+      setAnalyzingMessage(false);
+    }
+  };
+
   return (
     <div className="popup">
       <div className="row">
@@ -106,17 +136,54 @@ export function Popup() {
       <textarea
         value={text}
         placeholder="Paste an SMS, email or chat message..."
-        onChange={(e) => setText(e.target.value)}
+        disabled={analyzingMessage}
+        onChange={(e) => {
+          setText(e.target.value);
+          setTextVerdict(null);
+          setTextExplanation(null);
+          setAnalysisStatus(null);
+        }}
       />
+      <p className="muted" style={{ margin: '4px 0' }}>
+        {text.length.toLocaleString()} / 20,000 characters
+      </p>
       <div className="actions">
-        <button onClick={async () => setTextVerdict(scanText(text, await getDetectionRules()))} disabled={!text.trim()}>
-          Analyze
+        <button onClick={() => void analyzeMessage('automatic')} disabled={!text.trim() || analyzingMessage || text.length > 20_000}>
+          {analyzingMessage ? 'Analyzing...' : 'Analyze'}
         </button>
         <button className="secondary" onClick={() => chrome.runtime.openOptionsPage()}>
           Settings
         </button>
       </div>
-      {textVerdict && <VerdictCard verdict={textVerdict} />}
+      {text.length > 20_000 && <p className="muted" role="alert">Shorten the message to 20,000 characters or fewer.</p>}
+      {analysisStatus && <p className="muted" role="status">{analysisStatus}</p>}
+      {textVerdict && (
+        <>
+          <VerdictCard verdict={textVerdict} />
+          <button
+            className="secondary"
+            onClick={() => void analyzeMessage('explain')}
+            disabled={analyzingMessage || text.length > 20_000}
+          >
+            Why is this suspicious?
+          </button>
+          {textExplanation && (
+            <section className="card" aria-label="Qwen explanation">
+              <div className="row">
+                <strong>Qwen explanation</strong>
+                <span className="muted">{textExplanation.risk_level.replace('_', ' ')}</span>
+              </div>
+              <p>{textExplanation.summary}</p>
+              {textExplanation.reasons.length > 0 && (
+                <ul>
+                  {textExplanation.reasons.map((reason, index) => <li key={`${index}-${reason}`}>{reason}</li>)}
+                </ul>
+              )}
+              <p><strong>Safe next step:</strong> {textExplanation.recommendation}</p>
+            </section>
+          )}
+        </>
+      )}
 
       <div className="row">
         <h2>Recently blocked</h2>
