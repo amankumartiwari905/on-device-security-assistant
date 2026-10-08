@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseEml } from '../src/engine/email/emlParser';
+import { MAX_EML_SIZE } from '../src/engine/email/headerVerifier';
 
 describe('parseEml', () => {
   it('extracts selected headers, plain text, and unverified auth alignment claims', async () => {
@@ -77,5 +78,12 @@ describe('parseEml', () => {
       '',
       'not base64!',
     ].join('\n'))).rejects.toThrow('invalid base64');
+  });
+
+  it('rejects messages above the total byte limit before parsing MIME content', async () => {
+    await expect(parseEml(`From: sender@example.com\n\n${'x'.repeat(MAX_EML_SIZE)}`))
+      .rejects.toThrow('bytes or fewer');
+    await expect(parseEml(`From: sender@example.com\n\n${'é'.repeat(MAX_EML_SIZE / 2)}`))
+      .rejects.toThrow('bytes or fewer');
   });
 });

@@ -13,6 +13,11 @@ const SENSITIVE_QUERY_KEYS = new Set([
   'account', 'card', 'code', 'email', 'login', 'otp', 'pass', 'password', 'payment', 'pin', 'user', 'username',
 ]);
 const SENSITIVE_PATH = /(?:^|[\/_-])(?:account|billing|checkout|confirm|login|payment|password|signin|verify)(?:$|[\/_-])/i;
+const CONFUSABLE_SCRIPTS = [
+  /\p{Script=Latin}/u,
+  /\p{Script=Cyrillic}/u,
+  /\p{Script=Greek}/u,
+];
 
 function rawHostname(raw: string, fallback: string): string {
   const authority = raw.match(/^https?:\/\/([^/?#]*)/i)?.[1];
@@ -20,6 +25,18 @@ function rawHostname(raw: string, fallback: string): string {
   const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
   if (hostPort.startsWith('[')) return hostPort.slice(0, hostPort.indexOf(']') + 1);
   return hostPort.replace(/:\d+$/, '');
+}
+
+function hasMixedConfusableScripts(hostname: string): boolean {
+  return hostname.split('.').some((label) => {
+    const scripts = new Set<number>();
+    for (const character of label) {
+      const script = CONFUSABLE_SCRIPTS.findIndex((pattern) => pattern.test(character));
+      if (script >= 0) scripts.add(script);
+      if (scripts.size > 1) return true;
+    }
+    return false;
+  });
 }
 
 function decodeCandidates(value: string): string[] {
@@ -86,6 +103,9 @@ export function analyzeUrl(raw: string, rules: DetectionRules = DEFAULT_DETECTIO
   if (f.hasIp) add('ip-host', 40, 'Uses a raw IP address instead of a domain name');
   if (f.hasAt) add('credentials-in-url', 30, 'Contains a username/password section that can hide the real destination');
   if (f.hasPunycode) add('punycode', 25, 'Domain uses special international characters that can imitate real brands');
+  if (hasMixedConfusableScripts(rawHostname(raw, url.hostname))) {
+    add('mixed-script', 30, 'Domain mixes Latin, Cyrillic, or Greek characters that can look alike');
+  }
   if (url.protocol === 'http:') add('no-https', 10, 'Connection is not encrypted (HTTP)');
   if (f.length > 500) add('long-url', 25, 'Extremely long link with excessive tracking or hidden data');
   else if (f.length > 200) add('long-url', 15, 'Unusually long link');

@@ -35,7 +35,7 @@ describe('email header verification', () => {
     expect(result.signals).toEqual([]);
   });
 
-  it('raises evidence signals for reported authentication failures and sender mismatches', () => {
+  it('keeps authentication failures as unverified warnings, scoring only sender mismatches', () => {
     const result = analyzeEmailHeaders([
       'From: alerts@bank.example',
       'Return-Path: <bounce@unrelated.example>',
@@ -46,17 +46,17 @@ describe('email header verification', () => {
     expect(result.dmarcStatus).toBe('reported-fail');
     expect(result.signals.map((signal) => signal.id)).toEqual(expect.arrayContaining([
       'return-path-mismatch',
+    ]));
+    expect(result.signals.map((signal) => signal.id)).not.toEqual(expect.arrayContaining([
       'header-spf-failure',
       'header-dkim-failure',
       'header-dmarc-failure',
     ]));
-    expect(result.riskScore).toBeGreaterThanOrEqual(60);
-    expect(result.signals
-      .filter((signal) => signal.id.startsWith('header-'))
-      .every((signal) => signal.reason.includes('report'))).toBe(true);
+    expect(result.riskScore).toBe(15);
+    expect(result.warnings.some((warning) => warning.includes('SPF fail, DKIM fail, DMARC fail'))).toBe(true);
   });
 
-  it('uses Received-SPF as a reported claim when Authentication-Results is absent', () => {
+  it('records Received-SPF failures as claims and warnings, not scored evidence', () => {
     const result = analyzeEmailHeaders([
       'From: sender@example.com',
       'Received-SPF: softfail (mx.receiver.example: domain of sender@other.example does not designate permitted sender)',
@@ -66,7 +66,8 @@ describe('email header verification', () => {
       { method: 'spf', result: 'softfail', source: 'Received-SPF', authservId: 'mx.receiver.example' },
     ]);
     expect(result.dmarcStatus).toBe('missing');
-    expect(result.signals.map((signal) => signal.id)).toContain('header-spf-failure');
+    expect(result.signals.map((signal) => signal.id)).not.toContain('header-spf-failure');
+    expect(result.warnings.some((warning) => warning.includes('SPF softfail'))).toBe(true);
   });
 
   it('ignores body text after the header separator and warns when results are missing', () => {

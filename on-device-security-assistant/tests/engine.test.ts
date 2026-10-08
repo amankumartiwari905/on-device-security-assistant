@@ -92,6 +92,13 @@ describe('URL scanning', () => {
   it('detects capital-I lookalikes and Unicode homoglyphs', () => {
     expect(scanUrl('https://paypaI.com').signals.some((s) => s.id === 'homoglyph')).toBe(true);
     expect(scanUrl(`https://${String.fromCodePoint(0x440, 0x430)}ypal.com`).signals.some((s) => s.id === 'homoglyph')).toBe(true);
+    expect(scanUrl('https://ρaypal.com').signals.some((s) => s.id === 'homoglyph')).toBe(true);
+  });
+
+  it('flags mixed confusable scripts without treating a single-script IDN as mixed', () => {
+    expect(scanUrl('https://раypal.com').signals.some((signal) => signal.id === 'mixed-script')).toBe(true);
+    expect(scanUrl('https://παράδειγμα.com').signals.some((signal) => signal.id === 'mixed-script')).toBe(false);
+    expect(scanUrl('https://xn--bcher-kva.de').signals.some((signal) => signal.id === 'punycode')).toBe(true);
   });
 
   it('detects malformed and obfuscated encodings', () => {

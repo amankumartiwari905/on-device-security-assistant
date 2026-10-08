@@ -1,6 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkEmailReputations } from '../src/background/emailReputation';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { checkEmailReputations, clearReputationCaches } from '../src/background/emailReputation';
 import { addOnlineReputation, analyzePageEmails } from '../src/engine/email/emailAnalyzer';
+
+beforeEach(async () => {
+  await clearReputationCaches();
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -46,6 +50,16 @@ describe('checkEmailReputations', () => {
           },
         }), { status: 200 });
       }
+      if (url === 'https://data.iana.org/rdap/dns.json') {
+        return new Response(JSON.stringify({
+          services: [[['example'], ['https://rdap.example/']]],
+        }), { status: 200 });
+      }
+      if (url === 'https://rdap.example/domain/scam-check-test.example') {
+        return new Response(JSON.stringify({
+          events: [{ eventAction: 'registration', eventDate: new Date(Date.now() - 10 * 86_400_000).toISOString() }],
+        }), { status: 200 });
+      }
       throw new Error(`Unexpected provider: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -75,7 +89,7 @@ describe('checkEmailReputations', () => {
       'online-credentials-leaked',
       'online-new-domain',
     ]));
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
   it('adds provider evidence to local assessment without presenting it as proof', () => {

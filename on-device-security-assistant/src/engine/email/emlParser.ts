@@ -1,4 +1,4 @@
-import { analyzeEmailHeaders } from './headerVerifier';
+import { analyzeEmailHeaders, MAX_EML_SIZE } from './headerVerifier';
 import type { EmailHeaderAssessment } from './headerVerifier';
 
 export interface ParsedHeader {
@@ -314,6 +314,9 @@ function extractReceivedRoute(headers: Map<string, string[]>): ReceivedRoute[] {
 }
 
 export async function parseEml(rawMessage: string): Promise<ParsedEmail> {
+  if (rawMessage.length > MAX_EML_SIZE || new TextEncoder().encode(rawMessage).byteLength > MAX_EML_SIZE) {
+    throw new Error(`Email must be ${MAX_EML_SIZE.toLocaleString()} bytes or fewer.`);
+  }
   const normalizedMessage = rawMessage.replace(/^\uFEFF/, '');
   const [rawHeaders] = splitHeaderBody(normalizedMessage);
   const topHeaders = parseHeaders(rawHeaders);

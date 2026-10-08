@@ -54,8 +54,11 @@ The report compares visible link text with each target URL, and displays SPF,
 DKIM, DMARC and registrable-domain alignment claims when the supplied headers
 contain them. These results are not independently verified: headers can be
 forged, and the extension does not validate DKIM signatures or prove mailbox
-ownership. Return-Path differences are weak signals, not an automatic malicious
-verdict. Parsing, extraction, and local risk checks do not upload the message.
+ownership. Authentication claims and their reported alignment do not affect
+the risk score; only local sender and address indicators are scored.
+Return-Path differences are weak signals, not an automatic malicious verdict.
+The parser enforces the 1 MB limit in bytes even when called outside the popup.
+Parsing, extraction, and local risk checks do not upload the message.
 
 Authentication results are reported as claims from the supplied headers, not
 independently verified facts. A forged header can claim SPF/DKIM/DMARC passed;
@@ -80,6 +83,13 @@ reputation checker. Provider errors are reported as unavailable/partial data,
 not as proof that an email is safe or malicious. Recently registered domains
 and reputation matches are evidence signals, not a definitive sender identity
 check. Reload the extension after building to grant the new host permissions.
+
+## Local URL checks
+
+Page-link checks run locally. They examine URL structure (including IP hosts,
+nonstandard ports, HTTP, and known shorteners), punycode and mixed Latin,
+Cyrillic, or Greek characters, and domains resembling known brands. These are
+risk indicators, not proof that a site is malicious or safe.
 
 ## Optional URL reputation providers
 
