@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Guard",
   "version": "0.1.0",
-  "description": "On-device phishing and scam protection. Nothing leaves your browser.",
+  "description": "Phishing protection with local detection and online email reputation checks.",
   "icons": { "16": "icons/icon128.png", "48": "icons/icon128.png", "128": "icons/icon128.png" },
   "action": {
     "default_title": "AI Guard",
@@ -19,7 +19,16 @@
     }
   ],
   "permissions": ["storage", "webNavigation", "activeTab"],
-  "host_permissions": ["http://localhost:11434/*", "http://127.0.0.1:11434/*"],
+  "host_permissions": [
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*",
+    "https://emailrep.io/*",
+    "https://dns.google/*",
+    "https://safebrowsing.googleapis.com/*",
+    "https://www.virustotal.com/*",
+    "https://urlhaus-api.abuse.ch/*",
+    "https://checkurl.phishtank.com/*"
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }

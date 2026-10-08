@@ -5,6 +5,12 @@ export interface Settings {
   sensitivity: Sensitivity;
   allowlist: string[]; // hostnames that are never blocked
   scanPageText: boolean;
+  onlineEmailChecks: boolean;
+  onlineUrlChecks: boolean;
+  googleSafeBrowsingKey: string;
+  virusTotalKey: string;
+  urlhausAuthKey: string;
+  phishTankAppKey: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -12,6 +18,12 @@ export const DEFAULT_SETTINGS: Settings = {
   sensitivity: 'medium',
   allowlist: [],
   scanPageText: true,
+  onlineEmailChecks: true,
+  onlineUrlChecks: false,
+  googleSafeBrowsingKey: '',
+  virusTotalKey: '',
+  urlhausAuthKey: '',
+  phishTankAppKey: '',
 };
 
 const KEY = 'settings';

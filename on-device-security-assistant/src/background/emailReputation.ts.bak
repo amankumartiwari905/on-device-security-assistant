@@ -1,0 +1,320 @@
+import { MAX_EMAILS_PER_PAGE } from '../shared/emailReputation';
+import type { EmailReputationReport } from '../shared/emailReputation';
+import type { EmailSignal } from '../engine/email/emailSignals';
+
+const EMAILREP_ENDPOINT = 'https://emailrep.io/';
+const DNS_ENDPOINT = 'https://dns.google/resolve';
+const CACHE_TTL_MS = 30 * 60_000;
+const FAILURE_CACHE_TTL_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 8_000;
+const MAX_CONCURRENT_REQUESTS = 4;
+
+interface DomainCheck {
+  hasMx: boolean | null;
+  mxHosts: string[];
+  hasSpf: boolean | null;
+  hasDmarc: boolean | null;
+  ageDays: number | null;
+  error: string | null;
+}
+
+interface EmailRepCheck {
+  reputation: string | null;
+  suspicious: boolean | null;
+  references: number | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  dataBreaches: number | null;
+  domainAgeDays: number | null;
+  domainReputation: string | null;
+  domainExists: boolean | null;
+  flags: string[];
+  error: string | null;
+}
+
+const domainCache = new Map<string, { expiresAt: number; result: DomainCheck }>();
+const emailCache = new Map<string, { expiresAt: number; result: EmailRepCheck }>();
+let activeRequests = 0;
+const requestWaiters: Array<() => void> = [];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validEmail(value: string): boolean {
+  const separator = value.lastIndexOf('@');
+  if (value.length > 254 || separator < 1 || value.indexOf('@') !== separator) return false;
+  const local = value.slice(0, separator);
+  if (
+    local.length > 64 ||
+    local.startsWith('.') ||
+    local.endsWith('.') ||
+    local.includes('..') ||
+    !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)
+  ) return false;
+  const domain = value.slice(separator + 1).normalize('NFKC').toLowerCase().replace(/\.$/, '');
+  if (!domain || /[/:\\?#%\s]/.test(domain)) return false;
+  try {
+    const ascii = new URL(`http://${domain}`).hostname;
+    return ascii.includes('.') && ascii.length <= 253 && ascii.split('.').every((label) =>
+      label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeEmail(value: string): string | null {
+  if (!validEmail(value)) return null;
+  const separator = value.lastIndexOf('@');
+  const local = value.slice(0, separator);
+  const domain = new URL(`http://${value.slice(separator + 1).normalize('NFKC')}`).hostname.toLowerCase();
+  return `${local}@${domain}`;
+}
+
+function domainOf(email: string): string {
+  return new URL(`http://${email.slice(email.lastIndexOf('@') + 1)}`).hostname.toLowerCase().replace(/\.$/, '');
+}
+
+async function fetchJson(url: string, accept: string): Promise<unknown> {
+  if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
+    await new Promise<void>((resolve) => requestWaiters.push(resolve));
+  } else {
+    activeRequests++;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { headers: { Accept: accept }, signal: controller.signal });
+    if (!response.ok) throw new Error(`Provider returned HTTP ${response.status}.`);
+    return await response.json() as unknown;
+  } finally {
+    clearTimeout(timeout);
+    const next = requestWaiters.shift();
+    if (next) next();
+    else activeRequests--;
+  }
+}
+
+function readCache<T>(cache: Map<string, { expiresAt: number; result: T }>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.result;
+}
+
+function writeCache<T>(
+  cache: Map<string, { expiresAt: number; result: T }>,
+  key: string,
+  result: T,
+  ttl = CACHE_TTL_MS,
+): void {
+  cache.set(key, { expiresAt: Date.now() + ttl, result });
+  if (cache.size > 500) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey) cache.delete(oldestKey);
+  }
+}
+
+function parseDnsAnswer(data: unknown): Array<{ type: number; value: string }> {
+  if (!isRecord(data) || typeof data.Status !== 'number') throw new Error('DNS provider returned an invalid response.');
+  if (data.Status !== 0 && data.Status !== 3) throw new Error(`DNS lookup returned status ${data.Status}.`);
+  const answers = Array.isArray(data.Answer) ? data.Answer : [];
+  return answers
+    .filter(isRecord)
+    .filter((answer) => typeof answer.type === 'number' && typeof answer.data === 'string')
+    .map((answer) => ({ type: answer.type as number, value: (answer.data as string).trim() }));
+}
+
+function parseEmailRep(data: unknown): EmailRepCheck {
+  if (!isRecord(data)) throw new Error('EmailRep returned an invalid response.');
+  const details = isRecord(data.details) ? data.details : {};
+  const flags: string[] = [];
+  const mapFlags: [string, string][] = [
+    ['malicious_activity', 'Reported malicious activity'],
+    ['malicious_activity_recent', 'Recent malicious activity'],
+    ['blacklisted', 'Listed on a blocklist'],
+    ['spam', 'Associated with spam'],
+    ['credentials_leaked', 'Credentials reported leaked'],
+    ['disposable', 'Disposable email provider'],
+    ['new_domain', 'Recently registered domain'],
+  ];
+  for (const [field, label] of mapFlags) if (details[field] === true) flags.push(label);
+
+  return {
+    reputation: typeof data.reputation === 'string' ? data.reputation.slice(0, 40) : null,
+    suspicious: typeof data.suspicious === 'boolean' ? data.suspicious : null,
+    references: typeof data.references === 'number' && Number.isFinite(data.references) ? data.references : null,
+    firstSeen: typeof details.first_seen === 'string' ? details.first_seen.slice(0, 40) : null,
+    lastSeen: typeof details.last_seen === 'string' ? details.last_seen.slice(0, 40) : null,
+    dataBreaches: typeof details.data_breaches === 'number' && Number.isFinite(details.data_breaches)
+      ? Math.max(0, details.data_breaches)
+      : null,
+    domainAgeDays: typeof details.days_since_domain_creation === 'number' &&
+      Number.isFinite(details.days_since_domain_creation)
+      ? Math.max(0, Math.floor(details.days_since_domain_creation))
+      : null,
+    domainReputation: typeof details.domain_reputation === 'string'
+      ? details.domain_reputation.slice(0, 40)
+      : null,
+    domainExists: typeof details.domain_exists === 'boolean' ? details.domain_exists : null,
+    flags,
+    error: null,
+  };
+}
+
+async function checkDomain(domain: string): Promise<DomainCheck> {
+  const cached = readCache(domainCache, domain);
+  if (cached) return cached;
+
+  const result: DomainCheck = {
+    hasMx: null,
+    mxHosts: [],
+    hasSpf: null,
+    hasDmarc: null,
+    ageDays: null,
+    error: null,
+  };
+  const [mx, txt, dmarc] = await Promise.allSettled([
+    fetchJson(`${DNS_ENDPOINT}?name=${encodeURIComponent(domain)}&type=MX`, 'application/dns-json'),
+    fetchJson(`${DNS_ENDPOINT}?name=${encodeURIComponent(domain)}&type=TXT`, 'application/dns-json'),
+    fetchJson(`${DNS_ENDPOINT}?name=${encodeURIComponent(`_dmarc.${domain}`)}&type=TXT`, 'application/dns-json'),
+  ]);
+  const errors: string[] = [];
+  if (mx.status === 'fulfilled') {
+    try {
+      const hosts = parseDnsAnswer(mx.value)
+        .filter((answer) => answer.type === 15)
+        .map((answer) => answer.value.split(/\s+/).slice(1).join(' ').replace(/\.$/, '').toLowerCase())
+        .filter(Boolean);
+      result.hasMx = hosts.length > 0;
+      result.mxHosts = [...new Set(hosts)].slice(0, 5);
+    } catch {
+      errors.push('DNS/MX lookup returned invalid data.');
+    }
+  } else {
+    errors.push('DNS/MX lookup failed.');
+  }
+  if (txt.status === 'fulfilled') {
+    try {
+      result.hasSpf = parseDnsAnswer(txt.value).some((answer) =>
+        answer.type === 16 && answer.value.replace(/^["']|["']$/g, '').toLowerCase().startsWith('v=spf1'),
+      );
+    } catch {
+      errors.push('SPF lookup returned invalid data.');
+    }
+  } else {
+    errors.push('SPF lookup failed.');
+  }
+  if (dmarc.status === 'fulfilled') {
+    try {
+      result.hasDmarc = parseDnsAnswer(dmarc.value).some((answer) =>
+        answer.type === 16 && answer.value.replace(/^["']|["']$/g, '').toLowerCase().startsWith('v=dmarc1'),
+      );
+    } catch {
+      errors.push('DMARC lookup returned invalid data.');
+    }
+  } else {
+    errors.push('DMARC lookup failed.');
+  }
+  result.error = errors.length ? errors.join(' ') : null;
+  const hasDomainData = result.hasMx !== null || result.hasSpf !== null || result.hasDmarc !== null;
+  writeCache(domainCache, domain, result, hasDomainData ? CACHE_TTL_MS : FAILURE_CACHE_TTL_MS);
+  return result;
+}
+
+async function checkEmail(email: string): Promise<EmailRepCheck> {
+  const key = email.toLowerCase();
+  const cached = readCache(emailCache, key);
+  if (cached) return cached;
+
+  try {
+    const response = parseEmailRep(await fetchJson(
+      `${EMAILREP_ENDPOINT}${encodeURIComponent(email)}`,
+      'application/json',
+    ));
+    writeCache(emailCache, key, response);
+    return response;
+  } catch (error) {
+    const result = {
+      reputation: null,
+      suspicious: null,
+      references: null,
+      firstSeen: null,
+      lastSeen: null,
+      dataBreaches: null,
+      domainAgeDays: null,
+      domainReputation: null,
+      domainExists: null,
+      flags: [],
+      error: error instanceof Error ? error.message : 'Email reputation lookup failed.',
+    };
+    writeCache(emailCache, key, result, FAILURE_CACHE_TTL_MS);
+    return result;
+  }
+}
+
+function reputationSignals(email: EmailRepCheck, domain: DomainCheck): EmailSignal[] {
+  const signals: EmailSignal[] = [];
+  if (email.suspicious === true) {
+    signals.push({ id: 'online-email-suspicious', weight: 55, reason: 'Email reputation provider marks this address as suspicious' });
+  }
+  if (email.flags.includes('Reported malicious activity') || email.flags.includes('Recent malicious activity')) {
+    signals.push({ id: 'online-malicious-activity', weight: 75, reason: 'Email reputation provider reports malicious activity for this address' });
+  }
+  if (email.flags.includes('Listed on a blocklist')) {
+    signals.push({ id: 'online-email-blocklisted', weight: 70, reason: 'Email reputation provider reports this address on a blocklist' });
+  }
+  if (email.flags.includes('Associated with spam')) {
+    signals.push({ id: 'online-email-spam', weight: 55, reason: 'Email reputation provider associates this address with spam' });
+  }
+  if (email.flags.includes('Credentials reported leaked')) {
+    signals.push({ id: 'online-credentials-leaked', weight: 35, reason: 'Credentials for this address appear in breach intelligence; this does not prove the sender is a scammer' });
+  }
+  if (email.flags.includes('Disposable email provider')) {
+    signals.push({ id: 'online-disposable-provider', weight: 45, reason: 'Email reputation provider identifies a disposable email provider' });
+  }
+  if (email.domainExists === false) {
+    signals.push({ id: 'online-domain-not-found', weight: 50, reason: 'Email reputation provider reports that the email domain does not exist' });
+  }
+  if ((email.domainAgeDays !== null && email.domainAgeDays <= 30) || email.flags.includes('Recently registered domain')) {
+    const age = email.domainAgeDays === null ? 'recently' : `${email.domainAgeDays} days ago`;
+    signals.push({ id: 'online-new-domain', weight: 20, reason: `Email domain was registered ${age}; this alone does not prove fraud` });
+  }
+  return signals;
+}
+
+export async function checkEmailReputations(addresses: readonly string[]): Promise<Record<string, EmailReputationReport>> {
+  const uniqueByAddress = new Map<string, string>();
+  for (const address of addresses) {
+    const normalized = normalizeEmail(address.trim());
+    if (normalized && !uniqueByAddress.has(normalized.toLowerCase())) {
+      uniqueByAddress.set(normalized.toLowerCase(), normalized);
+    }
+  }
+  const unique = [...uniqueByAddress.values()].slice(0, MAX_EMAILS_PER_PAGE);
+  const domains = [...new Set(unique.map(domainOf))];
+  const domainResults = await Promise.all(domains.map(async (domain) => [domain, await checkDomain(domain)] as const));
+  const domainByName = new Map(domainResults);
+
+  const entries = await Promise.all(unique.map(async (email) => {
+    const [emailRep, cachedDomain] = await Promise.all([checkEmail(email), Promise.resolve(domainByName.get(domainOf(email))!)]);
+    const domain = { ...cachedDomain, ageDays: emailRep.domainAgeDays };
+    const emailAvailable = emailRep.error === null;
+    const domainAvailable = domain.hasMx !== null || domain.hasSpf !== null || domain.hasDmarc !== null;
+    return [email.toLowerCase(), {
+      checkedAt: Date.now(),
+      status: emailAvailable && domainAvailable ? 'complete' : emailAvailable || domainAvailable ? 'partial' : 'unavailable',
+      emailRep,
+      domain,
+      signals: reputationSignals(emailRep, domain),
+    }] as const;
+  }));
+
+  return Object.fromEntries(entries);
+}
+
+export const emailReputationLimits = { maxEmailsPerPage: MAX_EMAILS_PER_PAGE };

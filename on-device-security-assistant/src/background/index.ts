@@ -4,6 +4,8 @@ import { getDetectionRules } from '../storage/detectionRules';
 import { addHistory } from '../storage/history';
 import type { Message } from '../shared/messages';
 import { routeMessageAnalysis } from './threatRouter';
+import { checkEmailReputations, emailReputationLimits } from './emailReputation';
+import { checkUrlReputations, MAX_URLS_PER_LOOKUP } from './urlReputation';
 import { addAllowOnce, consumeAllowOnce } from './allowOnce';
 
 // Check every top-level navigation before the page loads.
@@ -66,6 +68,72 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
         sendResponse({
           error: error instanceof Error ? error.message : 'Could not analyze this message.',
         });
+      });
+    return true;
+  }
+  if (msg.type === 'CHECK_EMAIL_REPUTATION') {
+    if (
+      sender.id !== chrome.runtime.id ||
+      !sender.tab ||
+      sender.frameId !== 0 ||
+      !sender.url ||
+      !/^https?:/i.test(sender.url)
+    ) {
+      sendResponse({ error: 'Online email reputation checks are only available for scanned web pages.' });
+      return false;
+    }
+    if (
+      !Array.isArray(msg.addresses) ||
+      msg.addresses.length > emailReputationLimits.maxEmailsPerPage ||
+      !msg.addresses.every((address) => typeof address === 'string')
+    ) {
+      sendResponse({ error: `Check up to ${emailReputationLimits.maxEmailsPerPage} email addresses per page.` });
+      return false;
+    }
+
+    void getSettings()
+      .then((settings) => {
+        if (!settings.onlineEmailChecks) throw new Error('Online email reputation checks are disabled in settings.');
+        return checkEmailReputations(msg.addresses);
+      })
+      .then((results) => {
+        const response: import('../shared/emailReputation').EmailReputationResponse = {
+          results,
+          message: 'Online reputation lookup complete.',
+        };
+        sendResponse(response);
+      })
+      .catch((error: unknown) => {
+        console.warn('[AI Guard] online email reputation lookup failed', error);
+        sendResponse({
+          error: error instanceof Error ? error.message : 'Online email reputation lookup failed.',
+        });
+      });
+    return true;
+  }
+  if (msg.type === 'CHECK_URL_REPUTATION') {
+    if (sender.id !== chrome.runtime.id || sender.tab !== undefined) {
+      sendResponse({ error: 'Online URL reputation checks are only available from the AI Guard popup.' });
+      return false;
+    }
+    if (
+      !Array.isArray(msg.urls) ||
+      msg.urls.length > MAX_URLS_PER_LOOKUP ||
+      !msg.urls.every((url) => typeof url === 'string')
+    ) {
+      sendResponse({ error: `Check up to ${MAX_URLS_PER_LOOKUP} URLs at a time.` });
+      return false;
+    }
+
+    void getSettings()
+      .then((settings) => {
+        if (!settings.onlineUrlChecks) throw new Error('Online URL reputation checks are disabled in Settings.');
+        return checkUrlReputations(msg.urls, settings);
+      })
+      .then((results) => sendResponse({ results, message: 'Online URL reputation lookup complete.' }))
+      .catch((error: unknown) => {
+        console.warn('[AI Guard] online URL reputation lookup failed', error);
+        sendResponse({ error: error instanceof Error ? error.message : 'Online URL reputation lookup failed.' });
       });
     return true;
   }

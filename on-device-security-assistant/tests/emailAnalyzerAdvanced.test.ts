@@ -40,6 +40,16 @@ describe('extraction', () => {
     expect(result.status).toBe('suspicious');
     expect(result.explanation).toBe('This address does not have a valid email format.');
   });
+
+  it('rejects URL syntax and numeric top-level labels in email domains', () => {
+    const results = analyzePageEmails(
+      ['port@outside.example:443 path@outside.example/login numeric@outside.123'],
+      'example.com',
+    );
+    expect(results).toHaveLength(3);
+    expect(results.every((result) => idsOf(result.signals).includes('invalid-format'))).toBe(true);
+    expect(results.every((result) => result.status === 'suspicious')).toBe(true);
+  });
 });
 
 describe('benign addresses stay quiet', () => {
@@ -48,6 +58,12 @@ describe('benign addresses stay quiet', () => {
     expect(result.status).toBe('matches-site');
     expect(result.category).toBe('same-site');
     expect(result.riskScore).toBeLessThan(30);
+  });
+
+  it('normalizes URL-form page context before matching the site domain', () => {
+    const result = first('support@shop.example.com', 'https://www.example.com/account?ref=mail');
+    expect(result.status).toBe('matches-site');
+    expect(result.category).toBe('same-site');
   });
 
   it('treats a personal free-mail address as external, not suspicious', () => {

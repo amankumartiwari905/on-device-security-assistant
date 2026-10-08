@@ -1,7 +1,10 @@
-import { scanText } from '../engine';
-import type { Verdict } from '../engine';
+import { combineSignals, scanText } from '../engine';
+import type { Signal, Verdict } from '../engine';
 import type { AnalysisIntent, ThreatExplanation } from '../shared/messages';
 import type { DetectionRules } from '../engine/url/rules';
+import { extractUrls, hostOf } from '../engine/nlp/linkAnalysis';
+import { urlDomainSignals, shouldEnrich } from './intel/urlIntel';
+import type { IntelMode } from './intel/intelSettings';
 
 const OLLAMA_CHAT_URL = 'http://localhost:11434/api/chat';
 const OLLAMA_MODEL = 'qwen3.5:4b';
@@ -116,12 +119,26 @@ export async function routeMessageAnalysis(
   text: string,
   rules: DetectionRules,
   intent: AnalysisIntent = 'automatic',
+  privacyMode: IntelMode = 'off',
 ): Promise<ThreatAnalysis> {
   const input = text.trim();
   if (input.length === 0) throw new Error('Enter a message to analyze.');
   if (input.length > MAX_MESSAGE_LENGTH) throw new Error(`Messages must be ${MAX_MESSAGE_LENGTH.toLocaleString()} characters or fewer.`);
 
-  const localVerdict = scanText(input, rules);
+  const initialVerdict = scanText(input, rules);
+  let localVerdict = initialVerdict;
+  if (shouldEnrich(initialVerdict.score) && privacyMode !== 'off') {
+    const hosts = [...new Set(extractUrls(input).map(hostOf).filter((host) => host !== 'unknown'))];
+    const domainSignalGroups = await Promise.all(hosts.map((hostname) => urlDomainSignals(hostname, privacyMode)));
+    const domainSignals: Signal[] = domainSignalGroups.flatMap((signals, index) =>
+      signals.map((signal) => ({
+        ...signal,
+        id: `${signal.id}:${hosts[index]}`,
+        evidence: hosts[index],
+      })),
+    );
+    localVerdict = combineSignals([...initialVerdict.signals, ...domainSignals]);
+  }
   const trigger = intent === 'explain'
     ? 'user-request'
     : localVerdict.score >= QWEN_TRIGGER_SCORE

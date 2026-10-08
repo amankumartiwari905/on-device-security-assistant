@@ -65,6 +65,56 @@ export function Options() {
       </label>
 
       <label>
+        <input
+          type="checkbox"
+          checked={s.onlineEmailChecks}
+          onChange={(e) => update({ onlineEmailChecks: e.target.checked })}
+        />{' '}
+        Check email addresses online automatically
+      </label>
+      <p className="muted">
+        When enabled, up to 5 valid addresses found on each page are sent to EmailRep.io for reputation checks.
+        Google DNS receives the email domain only to inspect MX, SPF, and DMARC records. Results are cached temporarily in memory; disable this
+        option to keep email reputation checks local-only.
+      </p>
+
+      <h2>Online URL reputation providers</h2>
+      <label>
+        <input
+          type="checkbox"
+          checked={s.onlineUrlChecks}
+          onChange={(e) => update({ onlineUrlChecks: e.target.checked })}
+        />{' '}
+        Allow manual URL lookups
+      </label>
+      <p className="muted">
+        Lookups run only when you choose “Check links online” for a parsed email. Up to five full URLs are sent to
+        every provider with a configured key. Keys are stored in this browser profile’s extension storage (not
+        encrypted) and are sent only to their named provider. Do not use shared or managed browsers for personal keys.
+        Unconfigured providers are skipped; provider errors and no-match results are not proof that a URL is safe.
+      </p>
+      <label>
+        Google Safe Browsing API key
+        <input type="password" autoComplete="off" value={s.googleSafeBrowsingKey}
+          onChange={(e) => update({ googleSafeBrowsingKey: e.target.value })} />
+      </label>
+      <label>
+        VirusTotal API key
+        <input type="password" autoComplete="off" value={s.virusTotalKey}
+          onChange={(e) => update({ virusTotalKey: e.target.value })} />
+      </label>
+      <label>
+        URLhaus Auth-Key
+        <input type="password" autoComplete="off" value={s.urlhausAuthKey}
+          onChange={(e) => update({ urlhausAuthKey: e.target.value })} />
+      </label>
+      <label>
+        PhishTank application key
+        <input type="password" autoComplete="off" value={s.phishTankAppKey}
+          onChange={(e) => update({ phishTankAppKey: e.target.value })} />
+      </label>
+
+      <label>
         Blocking sensitivity{' '}
         <select value={s.sensitivity} onChange={(e) => update({ sensitivity: e.target.value as Sensitivity })}>
           <option value="low">Low (fewer warnings)</option>

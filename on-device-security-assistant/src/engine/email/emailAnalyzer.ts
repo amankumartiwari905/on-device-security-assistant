@@ -13,6 +13,7 @@ import {
   localPartSignals,
 } from './emailSignals';
 import type { EmailSignal } from './emailSignals';
+import type { EmailReputationReport } from '../../shared/emailReputation';
 
 export type { EmailSignal } from './emailSignals';
 
@@ -30,12 +31,13 @@ export interface EmailAssessment {
   category: EmailCategory;
   /** 0-100, combined from all signals. */
   riskScore: number;
-  /** Every warning sign found, strongest information first among the non-legacy checks. */
+  /** Every distinct warning sign found, strongest first. */
   signals: EmailSignal[];
   /** How many times the address appeared across the scanned sources. */
   occurrences: number;
   displayName?: string;
   source: EmailSource;
+  onlineReputation?: EmailReputationReport;
 }
 
 export interface EmailSummary {
@@ -62,10 +64,36 @@ const LOOKALIKE_IDS = new Set(['homoglyph', 'typosquat', 'brand-wrong-domain', '
 
 /** Internationalized domains become punycode (xn--...) so they can be validated and compared. */
 function toAsciiDomain(domain: string): string {
+  const normalized = domain.normalize('NFKC').toLowerCase().replace(/\.$/, '');
+  if (
+    normalized.length === 0 ||
+    normalized.length > 253 ||
+    !/^[\p{L}\p{M}\p{N}.-]+$/u.test(normalized) ||
+    normalized.includes('..') ||
+    normalized.startsWith('.') ||
+    normalized.endsWith('.')
+  ) {
+    return '';
+  }
+
   try {
-    return new URL(`http://${domain}`).hostname;
+    const hostname = new URL(`http://${normalized}`).hostname.toLowerCase().replace(/\.$/, '');
+    const labels = hostname.split('.');
+    if (
+      hostname.length > 253 ||
+      labels.length < 2 ||
+      labels.some((label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+      ) ||
+      /^\d+$/.test(labels[labels.length - 1])
+    ) {
+      return '';
+    }
+    return hostname;
   } catch {
-    return domain;
+    return '';
   }
 }
 
@@ -75,31 +103,72 @@ function isValidAddress(address: string): boolean {
   const [local, rawDomain] = address.split('@');
   if (!local || local.length > 64 || local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
   if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)) return false;
+  if (!rawDomain || /[\s/@\\:[\]?#%]/.test(rawDomain)) return false;
 
-  const domain = toAsciiDomain(rawDomain.toLowerCase().replace(/\.$/, ''));
-  const labels = domain.split('.');
-  return (
-    labels.length >= 2 &&
-    labels.every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))
-  );
+  const domain = toAsciiDomain(rawDomain);
+  return Boolean(domain) && local.length + domain.length + 1 <= 254;
+}
+
+function normalizePageHostname(hostname: string): string {
+  const raw = hostname.trim();
+  if (!raw) return '';
+
+  try {
+    const parsed = /^[a-z][a-z\d+.-]*:\/\//i.test(raw)
+      ? new URL(raw)
+      : new URL(`http://${raw}`);
+    if (parsed.username || parsed.password) return '';
+    const host = parsed.hostname;
+    return toAsciiDomain(host);
+  } catch {
+    return '';
+  }
+}
+
+function uniqueSignals(signals: readonly EmailSignal[]): EmailSignal[] {
+  const byId = new Map<string, EmailSignal>();
+  for (const signal of signals) {
+    const existing = byId.get(signal.id);
+    if (!existing || signal.weight > existing.weight) byId.set(signal.id, signal);
+  }
+  return [...byId.values()].sort((a, b) => b.weight - a.weight || a.id.localeCompare(b.id));
 }
 
 function explain(signals: readonly EmailSignal[], suspicious: boolean, sameSite: boolean): string {
   if (!suspicious) return sameSite ? TEXT.matchesSite : TEXT.external;
 
-  // Signals are ordered legacy-checks-first, so existing explanations stay the same.
-  const primary = signals.find((s) => s.weight >= SUSPICIOUS_AT) ?? [...signals].sort((a, b) => b.weight - a.weight)[0];
+  const primary = [...signals].sort((a, b) => b.weight - a.weight)[0];
+  if (!primary) return TEXT.external;
   const others = signals.length - 1;
   return primary.weight < SUSPICIOUS_AT && others > 0
     ? `${primary.reason} (plus ${others} other warning sign${others === 1 ? '' : 's'})`
     : primary.reason;
 }
 
+export function addOnlineReputation(
+  assessment: EmailAssessment,
+  onlineReputation: EmailReputationReport,
+): EmailAssessment {
+  const signals = uniqueSignals([...assessment.signals, ...onlineReputation.signals]);
+  const riskScore = combineWeights(signals);
+  const suspicious = riskScore >= SUSPICIOUS_AT;
+  const sameSite = assessment.category === 'same-site';
+  return {
+    ...assessment,
+    status: suspicious ? 'suspicious' : sameSite ? 'matches-site' : 'external',
+    explanation: explain(signals, suspicious, sameSite),
+    riskScore,
+    signals,
+    onlineReputation,
+  };
+}
+
 function assessCandidate(candidate: EmailCandidate, pageHostname: string, rules: DetectionRules): EmailAssessment {
   const address = candidate.address.trim();
-  const signals: EmailSignal[] = [];
+  const discoveredSignals: EmailSignal[] = [];
+  const normalizedPageHost = normalizePageHostname(pageHostname);
   const add = (id: string, weight: number, reason: string): void => {
-    signals.push({ id, weight, reason });
+    discoveredSignals.push({ id, weight, reason });
   };
 
   // Original checks first, in the original order.
@@ -118,13 +187,15 @@ function assessCandidate(candidate: EmailCandidate, pageHostname: string, rules:
     if (lookalike) add(lookalike.id, Math.max(lookalike.weight, 50), lookalike.reason);
 
     // Then the new checks.
-    signals.push(...domainSignals(domain, pageHostname), ...localPartSignals(local, registrable));
-    if (candidate.displayName) signals.push(...displayNameSignals(candidate.displayName, registrable));
+    discoveredSignals.push(...domainSignals(domain, normalizedPageHost), ...localPartSignals(local, registrable));
+    if (candidate.displayName) discoveredSignals.push(...displayNameSignals(candidate.displayName, registrable));
   }
 
+  const signals = uniqueSignals(discoveredSignals);
   const riskScore = combineWeights(signals);
   const suspicious = riskScore >= SUSPICIOUS_AT;
-  const sameSite = valid && pageHostname !== '' && registrable === getRegistrableDomain(pageHostname);
+  const pageRegistrable = normalizedPageHost ? getRegistrableDomain(normalizedPageHost) : '';
+  const sameSite = valid && pageRegistrable !== '' && registrable === pageRegistrable;
 
   const category: EmailCategory = !valid
     ? 'other-domain'
