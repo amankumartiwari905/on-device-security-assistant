@@ -121,22 +121,6 @@ function parseReceivedSpf(value: string): HeaderAuthClaim | null {
   };
 }
 
-function authenticationSignals(claims: readonly HeaderAuthClaim[]): EmailSignal[] {
-  const failed = claims.filter((claim) => ['fail', 'softfail', 'permerror'].includes(claim.result));
-  const signals: EmailSignal[] = [];
-  for (const method of ['spf', 'dkim', 'dmarc'] as const) {
-    const claimsForMethod = failed.filter((claim) => claim.method === method);
-    if (claimsForMethod.length === 0) continue;
-    const label = method.toUpperCase();
-    signals.push({
-      id: `header-${method}-failure`,
-      weight: method === 'dmarc' ? 65 : 55,
-      reason: `Supplied headers report ${label} ${claimsForMethod[0].result}; this result is not independently authenticated`,
-    });
-  }
-  return signals;
-}
-
 function addressDomain(value: string | null): string | null {
   if (!value) return null;
   const rawDomain = value.slice(value.lastIndexOf('@') + 1).replace(/\.$/, '').toLowerCase();
@@ -175,12 +159,10 @@ export function analyzeEmailHeaders(rawMessage: string): EmailHeaderAssessment {
   const returnPath = firstAddress(returnPathValue);
   const replyTo = firstAddress(replyToValue);
   const claims = (headers.get('authentication-results') ?? []).flatMap(parseAuthenticationResults);
-  if (claims.length === 0) {
-    const receivedSpf = (headers.get('received-spf') ?? [])
-      .map(parseReceivedSpf)
-      .filter((claim): claim is HeaderAuthClaim => claim !== null);
-    claims.push(...receivedSpf);
-  }
+  const receivedSpf = (headers.get('received-spf') ?? [])
+    .map(parseReceivedSpf)
+    .filter((claim): claim is HeaderAuthClaim => claim !== null);
+  claims.push(...receivedSpf);
 
   const identity = analyzeSenderIdentity({
     from: fromValue ?? '',
@@ -194,7 +176,7 @@ export function analyzeEmailHeaders(rawMessage: string): EmailHeaderAssessment {
     dkim: claimedAlignment('dkim', claims, fromDomain),
     dmarc: claimedAlignment('dmarc', claims, fromDomain),
   };
-  const signals = [...identity.signals, ...authenticationSignals(claims)];
+  const signals = [...identity.signals];
   const dmarcClaims = claims.filter((claim) => claim.method === 'dmarc');
   const dmarcStatus: EmailHeaderAssessment['dmarcStatus'] = dmarcClaims.some((claim) => claim.result === 'fail')
     ? 'reported-fail'
@@ -205,11 +187,17 @@ export function analyzeEmailHeaders(rawMessage: string): EmailHeaderAssessment {
         : 'missing';
 
   const warnings = [
-    'Authentication-Results and Received-SPF values are claims from the supplied headers; they can be forged.',
+    'Authentication-Results and Received-SPF values are unverified claims from the supplied headers; they can be forged and do not affect the risk score.',
     'Trust results only when these are the original headers from your receiving mail provider.',
     'This check does not independently validate DKIM signatures or prove control of the mailbox.',
     'Alignment uses relaxed registrable-domain comparison; the supplied headers do not establish the domain policy mode.',
   ];
+  const reportedFailures = claims.filter((claim) => ['fail', 'softfail', 'permerror'].includes(claim.result));
+  if (reportedFailures.length > 0) {
+    warnings.push(
+      `Supplied headers report ${[...new Set(reportedFailures.map((claim) => `${claim.method.toUpperCase()} ${claim.result}`))].join(', ')}; verify these claims with your receiving mail provider.`,
+    );
+  }
   if (headers.has('dkim-signature') && !claims.some((claim) => claim.method === 'dkim')) {
     warnings.push('A DKIM-Signature header is present, but its signature was not independently verified.');
   }

@@ -41,7 +41,7 @@ function hasExternalRedirect(url: URL): boolean {
   const candidates: string[] = [];
   for (const [key, value] of url.searchParams) {
     const normalizedKey = key.toLowerCase();
-    if (!REDIRECT_KEYS.has(normalizedKey) && !/https?:|%3a%2f%2f/i.test(value)) continue;
+    if (!REDIRECT_KEYS.has(normalizedKey)) continue;
     candidates.push(...decodeCandidates(value));
   }
   candidates.push(...decodeCandidates(url.pathname));

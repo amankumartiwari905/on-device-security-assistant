@@ -7,6 +7,7 @@ import { routeMessageAnalysis } from './threatRouter';
 import { checkEmailReputations, emailReputationLimits } from './emailReputation';
 import { checkUrlReputations, MAX_URLS_PER_LOOKUP } from './urlReputation';
 import { addAllowOnce, consumeAllowOnce } from './allowOnce';
+import { getIntelSettings } from './intel/intelSettings';
 
 // Check every top-level navigation before the page loads.
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
@@ -60,8 +61,8 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
       return false;
     }
 
-    void getDetectionRules()
-      .then((rules) => routeMessageAnalysis(msg.text, rules, msg.intent))
+    void Promise.all([getDetectionRules(), getIntelSettings()])
+      .then(([rules, intelSettings]) => routeMessageAnalysis(msg.text, rules, msg.intent, intelSettings.mode))
       .then(sendResponse)
       .catch((error: unknown) => {
         console.error('[AI Guard] message analysis failed', error);
@@ -128,7 +129,12 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
     void getSettings()
       .then((settings) => {
         if (!settings.onlineUrlChecks) throw new Error('Online URL reputation checks are disabled in Settings.');
-        return checkUrlReputations(msg.urls, settings);
+        return getIntelSettings().then((intelSettings) => {
+          if (intelSettings.mode !== 'full') {
+            throw new Error('Full URL reputation checks require Full privacy mode.');
+          }
+          return checkUrlReputations(msg.urls, settings);
+        });
       })
       .then((results) => sendResponse({ results, message: 'Online URL reputation lookup complete.' }))
       .catch((error: unknown) => {

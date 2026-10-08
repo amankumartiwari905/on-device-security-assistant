@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { scanText } from '../src/engine';
 import { DEFAULT_DETECTION_RULES } from '../src/engine/url/rules';
 import { routeMessageAnalysis } from '../src/background/threatRouter';
+import { clearIntelCache } from '../src/background/intel/cache';
+import { shouldEnrich } from '../src/background/intel/urlIntel';
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  await clearIntelCache();
 });
 
 const explanation = {
@@ -29,7 +32,7 @@ describe('routeMessageAnalysis', () => {
     const message = 'Share your OTP immediately or your account will be blocked.';
     const localVerdict = scanText(message);
 
-    const result = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES);
+    const result = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'automatic', 'full');
 
     expect(localVerdict.score).toBeGreaterThanOrEqual(30);
     expect(result.trigger).toBe('risk-threshold');
@@ -58,7 +61,7 @@ describe('routeMessageAnalysis', () => {
     vi.stubGlobal('fetch', fetchMock);
     const message = 'Hi, are we still meeting tomorrow?';
 
-    const automatic = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES);
+    const automatic = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'automatic', 'full');
 
     expect(automatic.verdict.score).toBeLessThan(30);
     expect(automatic.trigger).toBe('not-triggered');
@@ -72,7 +75,7 @@ describe('routeMessageAnalysis', () => {
       summary: 'The local scan found no elevated-risk indicators.',
       reasons: [],
     }));
-    const requested = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'explain');
+    const requested = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'explain', 'full');
 
     expect(requested.trigger).toBe('user-request');
     expect(requested.ollama.status).toBe('analyzed');
@@ -90,7 +93,7 @@ describe('routeMessageAnalysis', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const message = 'Your account will be blocked unless you verify your OTP.';
 
-    const result = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES);
+    const result = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'automatic', 'full');
 
     const localVerdict = scanText(message);
     expect(result.verdict).toMatchObject({
@@ -112,6 +115,8 @@ describe('routeMessageAnalysis', () => {
     const result = await routeMessageAnalysis(
       'Your account will be blocked unless you verify your OTP.',
       DEFAULT_DETECTION_RULES,
+      'automatic',
+      'full',
     );
 
     expect(result.ollama.status).toBe('unavailable');
@@ -123,8 +128,48 @@ describe('routeMessageAnalysis', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(routeMessageAnalysis('  ', DEFAULT_DETECTION_RULES)).rejects.toThrow('Enter a message');
-    await expect(routeMessageAnalysis('x'.repeat(20_001), DEFAULT_DETECTION_RULES)).rejects.toThrow('20,000');
+    await expect(routeMessageAnalysis('  ', DEFAULT_DETECTION_RULES, 'automatic', 'full')).rejects.toThrow('Enter a message');
+    await expect(routeMessageAnalysis('x'.repeat(20_001), DEFAULT_DETECTION_RULES, 'automatic', 'full')).rejects.toThrow('20,000');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('enriches borderline message URLs through the selected domain privacy mode', async () => {
+    const message = 'Check this link: https://example.xyz/login?email=x';
+    expect(shouldEnrich(scanText(message).score)).toBe(true);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url === 'https://data.iana.org/rdap/dns.json') {
+        return new Response(JSON.stringify({
+          services: [[['com', 'xyz'], ['https://rdap.example/']]],
+        }), { status: 200 });
+      }
+      if (url === 'https://rdap.example/domain/example.xyz') {
+        return new Response(JSON.stringify({
+          events: [{ eventAction: 'registration', eventDate: new Date(Date.now() - 86_400_000).toISOString() }],
+        }), { status: 200 });
+      }
+      if (url === 'http://localhost:11434/api/chat') return ollamaResponse(explanation);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'automatic', 'domains');
+
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('https://data.iana.org/rdap/dns.json');
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('https://rdap.example/domain/example.xyz');
+    expect(result.verdict.signals.some((signal) => signal.id === 'new-domain:example.xyz')).toBe(true);
+  });
+
+  it('makes no network requests when privacy mode is off', async () => {
+    const message = 'Your account will be blocked unless you verify your OTP at https://example.com';
+    const fetchMock = vi.fn().mockResolvedValue(ollamaResponse(explanation));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await routeMessageAnalysis(message, DEFAULT_DETECTION_RULES, 'explain', 'off');
+
+    expect(result.ollama.status).toBe('skipped');
+    expect(result.ollama.message).toContain('Privacy mode is off');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

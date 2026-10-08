@@ -105,6 +105,21 @@ describe('URL scanning', () => {
     expect(scanUrl('https://example.com/out/https%3A%2F%2Fevil.example%2Flogin').signals.some((s) => s.id === 'external-redirect')).toBe(true);
   });
 
+  it('does not treat a Gmail compose body as a redirect destination', () => {
+    const composeUrl = new URL('https://mail.google.com/mail/u/0/');
+    composeUrl.searchParams.set('view', 'cm');
+    composeUrl.searchParams.set('fs', '1');
+    composeUrl.searchParams.set('to', 'person@example.com');
+    composeUrl.searchParams.set('body', 'Please review https://example.org/login');
+
+    expect(scanUrl(composeUrl.href).signals.some((signal) => signal.id === 'external-redirect')).toBe(false);
+  });
+
+  it('still detects an external URL in an explicit redirect parameter', () => {
+    const url = 'https://mail.google.com/mail/u/0/?url=https%3A%2F%2Fevil.example%2Flogin';
+    expect(scanUrl(url).signals.some((signal) => signal.id === 'external-redirect')).toBe(true);
+  });
+
   it('flags malformed URLs, excessive length and suspicious TLDs', () => {
     expect(scanUrl('not a valid URL').signals.some((s) => s.id === 'invalid-url')).toBe(true);
     expect(scanUrl(`https://example.com/${'a'.repeat(220)}`).signals.some((s) => s.id === 'long-url')).toBe(true);

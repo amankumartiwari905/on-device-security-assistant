@@ -118,15 +118,15 @@ async function analyzeWithOllama(
 export async function routeMessageAnalysis(
   text: string,
   rules: DetectionRules,
-  intent: AnalysisIntent = 'automatic',
-  privacyMode: IntelMode = 'off',
+  intent: AnalysisIntent,
+  privacyMode: IntelMode,
 ): Promise<ThreatAnalysis> {
   const input = text.trim();
   if (input.length === 0) throw new Error('Enter a message to analyze.');
   if (input.length > MAX_MESSAGE_LENGTH) throw new Error(`Messages must be ${MAX_MESSAGE_LENGTH.toLocaleString()} characters or fewer.`);
 
   const initialVerdict = scanText(input, rules);
-  let localVerdict = initialVerdict;
+  let localVerdict: Verdict = initialVerdict;
   if (shouldEnrich(initialVerdict.score) && privacyMode !== 'off') {
     const hosts = [...new Set(extractUrls(input).map(hostOf).filter((host) => host !== 'unknown'))];
     const domainSignalGroups = await Promise.all(hosts.map((hostname) => urlDomainSignals(hostname, privacyMode)));
@@ -150,6 +150,14 @@ export async function routeMessageAnalysis(
       explanation: null,
       trigger,
       ollama: { status: 'skipped', message: 'Local scan found no elevated risk; Qwen was not triggered.' },
+    };
+  }
+  if (privacyMode === 'off') {
+    return {
+      verdict: localVerdict,
+      explanation: null,
+      trigger,
+      ollama: { status: 'skipped', message: 'Privacy mode is off; only the on-device scan was run.' },
     };
   }
 
