@@ -7,6 +7,7 @@ import { getDetectionRules } from '../../storage/detectionRules';
 import { clearHistory, getHistory } from '../../storage/history';
 import type { HistoryItem } from '../../storage/history';
 import type { AnalyzeMessageResponse, ThreatExplanation } from '../../shared/messages';
+import type { PageLinkAssessment, PageLinksResponse } from '../../shared/messages';
 import { MAX_EML_SIZE } from '../../engine/email/headerVerifier';
 import { parseEml } from '../../engine/email/emlParser';
 import type { ParsedEmail } from '../../engine/email/emlParser';
@@ -27,6 +28,8 @@ export function Popup() {
   const [onlineUrlChecks, setOnlineUrlChecks] = useState(false);
   const [tabUrl, setTabUrl] = useState('');
   const [pageVerdict, setPageVerdict] = useState<Verdict | null>(null);
+  const [pageLinks, setPageLinks] = useState<PageLinkAssessment[] | null>(null);
+  const [pageLinksError, setPageLinksError] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [textVerdict, setTextVerdict] = useState<Verdict | null>(null);
   const [textExplanation, setTextExplanation] = useState<ThreatExplanation | null>(null);
@@ -71,6 +74,19 @@ export function Popup() {
         if (tab?.url && /^https?:/i.test(tab.url)) {
           setTabUrl(tab.url);
           setPageVerdict(scanUrl(tab.url, rules));
+          if (tab.id !== undefined) {
+            void chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_LINKS' })
+              .then((response: PageLinksResponse) => {
+                if (cancelled) return;
+                if ('error' in response) setPageLinksError(response.error);
+                else setPageLinks(response.links);
+              })
+              .catch((error: unknown) => {
+                if (cancelled) return;
+                console.warn('[AI Guard] could not request page link analysis', error);
+                setPageLinksError('Could not inspect links on this page. Reload the page and try again.');
+              });
+          }
         }
       } else {
         errors.push('active tab');
@@ -203,6 +219,25 @@ export function Popup() {
         <>
           <div className="muted popup-url" title={tabUrl}>{tabUrl}</div>
           <VerdictCard verdict={pageVerdict} />
+          {pageLinksError && <p className="muted" role="status">{pageLinksError}</p>}
+          {pageLinks && pageLinks.length > 0 && (
+            <section className="page-links" aria-label="Suspicious links on this page">
+              <h2>Suspicious links ({pageLinks.length})</h2>
+              {pageLinks.map((link) => (
+                <article className="page-link" key={link.url}>
+                  <div className="row">
+                    <strong className={`page-link-level ${link.verdict.level}`}>
+                      {link.verdict.level === 'dangerous' ? 'Dangerous' : 'Suspicious'}
+                    </strong>
+                    <strong>{link.verdict.score}/100</strong>
+                  </div>
+                  {link.text && <div className="muted page-link-text">Text: {link.text}</div>}
+                  <div className="page-link-url">{link.url}</div>
+                  {link.verdict.reasons[0] && <p>{link.verdict.reasons[0]}</p>}
+                </article>
+              ))}
+            </section>
+          )}
         </>
       ) : (
         <p className="muted">Open a website to see its risk.</p>

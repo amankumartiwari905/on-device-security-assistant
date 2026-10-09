@@ -3,6 +3,7 @@ import type { ScanResult, Verdict } from '../engine';
 import { analyzePageEmails } from '../engine/email/emailAnalyzer';
 import type { EmailAssessment, EmailStatus } from '../engine/email/emailAnalyzer';
 import { getSettings } from '../storage/settings';
+import { getDetectionRules } from '../storage/detectionRules';
 import type { Message } from '../shared/messages';
 
 const SCANNED = 'data-aiguard';
@@ -11,7 +12,6 @@ let lastScannedText: string | undefined;
 let lastScannedUrl = '';
 let lastPageVerdict: ScanResult | undefined;
 let lastEmailSnapshot = '';
-let bannerDismissed = false;
 let emailPanelDismissed = false;
 let timer: number | undefined;
 
@@ -48,8 +48,43 @@ function scanLinks(): void {
   });
 }
 
+chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
+  if (msg.type !== 'GET_PAGE_LINKS') return false;
+  if (sender.id !== chrome.runtime.id) {
+    sendResponse({ error: 'Page link analysis is only available to AI Guard.' });
+    return false;
+  }
+
+  void getDetectionRules()
+    .then((rules) => {
+      const uniqueLinks = new Map<string, ReturnType<typeof scanUrl>>();
+      const anchors = new Map<string, string>();
+      document.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((anchor) => {
+        if (!/^https?:/i.test(anchor.href) || uniqueLinks.has(anchor.href)) return;
+        const verdict = scanUrl(anchor.href, rules);
+        if (verdict.level === 'safe' && !textLooksLikeDifferentSite(anchor)) return;
+        uniqueLinks.set(anchor.href, verdict);
+        anchors.set(anchor.href, (anchor.textContent ?? '').trim().slice(0, 160));
+      });
+
+      return {
+        links: [...uniqueLinks].map(([url, verdict]) => ({
+          url,
+          text: anchors.get(url) ?? '',
+          verdict,
+        })),
+      };
+    })
+    .then(sendResponse)
+    .catch((error: unknown) => {
+      console.error('[AI Guard] could not analyze links on this page', error);
+      sendResponse({ error: 'Could not analyze links on this page.' });
+    });
+  return true;
+});
+
 function showBanner(verdict: Verdict): void {
-  if (bannerDismissed || document.getElementById('aiguard-banner')) return;
+  if (document.getElementById('aiguard-banner')) return;
 
   const host = document.createElement('div');
   host.id = 'aiguard-banner';
@@ -78,10 +113,7 @@ function showBanner(verdict: Verdict): void {
   }
   const btn = document.createElement('button');
   btn.textContent = 'Dismiss';
-  btn.addEventListener('click', () => {
-    bannerDismissed = true;
-    host.remove();
-  });
+  btn.addEventListener('click', () => host.remove());
 
   box.append(title, list, btn);
   root.append(style, box);
@@ -215,7 +247,6 @@ async function run(): Promise<void> {
   if (settings.scanPageText) {
     const text = document.body?.innerText ?? '';
     const url = location.href;
-    if (url !== lastScannedUrl) bannerDismissed = false;
     if (text !== lastScannedText || url !== lastScannedUrl || !lastPageVerdict) {
       lastScannedText = text;
       lastScannedUrl = url;

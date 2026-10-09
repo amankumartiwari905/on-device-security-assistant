@@ -69,6 +69,12 @@ describe('URL scanning', () => {
     expect(scanUrl('https://paypa1.com').signals.some((s) => s.id === 'homoglyph')).toBe(true);
   });
 
+  it('flags the PayPal lookalike login link shown in the demo', () => {
+    const verdict = scanUrl('https://paypa1.com/login');
+    expect(verdict.level).not.toBe('safe');
+    expect(verdict.signals.some((signal) => signal.id === 'homoglyph')).toBe(true);
+  });
+
   it('detects common brand spoofs offline', () => {
     for (const domain of [
       'paypa1.com',

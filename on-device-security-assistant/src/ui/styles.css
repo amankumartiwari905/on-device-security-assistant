@@ -49,6 +49,13 @@ label { display: block; margin: 10px 0; }
 .popup-status { margin: 3px 0 10px; }
 .popup-heading { margin-top: 8px; }
 .popup-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-links h2 { margin: 12px 0 6px; }
+.page-link { padding: 8px 0; border-top: 1px solid #e5e7eb; font-size: 12px; }
+.page-link-level.suspicious { color: #d97706; }
+.page-link-level.dangerous { color: #dc2626; }
+.page-link-text, .page-link-url { margin-top: 4px; overflow-wrap: anywhere; }
+.page-link-url { color: #111; font-weight: 600; }
+.page-link p { margin: 4px 0 0; color: #52616a; }
 .popup-section { margin-top: 8px; border-top: 1px solid #e5e7eb; }
 .popup-section > summary { padding: 10px 0; font-size: 13px; }
 .popup-section-content { padding-bottom: 10px; }
