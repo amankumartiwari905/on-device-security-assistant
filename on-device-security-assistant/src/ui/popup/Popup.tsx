@@ -18,6 +18,7 @@ import type { ParsedEmail } from '../../engine/email/emlParser';
 import type { CheckUrlReputationResponse } from '../../shared/messages';
 import type { UrlReputationProvider, UrlReputationReport } from '../../shared/urlReputation';
 import { VerdictCard } from '../components/VerdictCard';
+import { includePageLinkClues } from './pageRisk';
 
 async function inspectPageLinks(tabId: number, rules: DetectionRules): Promise<PageLinkAssessment[]> {
   const [injection] = await chrome.scripting.executeScript({
@@ -56,7 +57,6 @@ function timeAgo(ms: number): string {
 }
 
 export function Popup() {
-  const [popupSize, setPopupSize] = useState(1);
   const [enabled, setEnabled] = useState(true);
   const [onlineUrlChecks, setOnlineUrlChecks] = useState(false);
   const [tabUrl, setTabUrl] = useState('');
@@ -82,6 +82,10 @@ export function Popup() {
 
   useEffect(() => {
     let cancelled = false;
+    const applyPageLinks = (links: PageLinkAssessment[]) => {
+      setPageLinks(links);
+      setPageVerdict((verdict) => verdict ? includePageLinkClues(verdict, links) : verdict);
+    };
     const load = async () => {
       const [settingsResult, rulesResult, historyResult, tabsResult] = await Promise.allSettled([
         Promise.resolve().then(getSettings),
@@ -116,7 +120,7 @@ export function Popup() {
               void inspectPageLinks(tabId, rules ?? DEFAULT_DETECTION_RULES)
                 .then((links) => {
                   if (!cancelled) {
-                    setPageLinks(links);
+                    applyPageLinks(links);
                     setPageLinksError(null);
                   }
                 })
@@ -131,7 +135,7 @@ export function Popup() {
                 if (cancelled) return;
                 if ('error' in response) useScriptingFallback(response.error);
                 else {
-                  setPageLinks(response.links);
+                  applyPageLinks(response.links);
                   setPageLinksError(null);
                 }
               })
@@ -276,32 +280,10 @@ export function Popup() {
   };
 
   return (
-    <div className="popup" data-size={popupSize}>
+    <div className="popup">
       <div className="row popup-header">
         <h1>AI Guard</h1>
         <div className="popup-header-actions">
-          <div className="popup-size-controls" role="group" aria-label="Popup size">
-            <button
-              className="secondary popup-size-button"
-              type="button"
-              aria-label="Decrease popup size"
-              title="Decrease popup size"
-              disabled={popupSize === 0}
-              onClick={() => setPopupSize((size) => Math.max(0, size - 1))}
-            >
-              −
-            </button>
-            <button
-              className="secondary popup-size-button"
-              type="button"
-              aria-label="Increase popup size"
-              title="Increase popup size"
-              disabled={popupSize === 2}
-              onClick={() => setPopupSize((size) => Math.min(2, size + 1))}
-            >
-              +
-            </button>
-          </div>
           <button className="secondary popup-settings" onClick={() => chrome.runtime.openOptionsPage()}>
             Settings
           </button>
@@ -527,112 +509,140 @@ function EmailAnalysisResult({ email }: { email: ParsedEmail }) {
       </p>
       <details className="email-report-details">
         <summary>See email details</summary>
-      <details>
-        <summary>Headers ({email.headers.length})</summary>
-        <ul className="header-claims">
-          {email.headers.map(({ name, values }) => (
-            <li key={name}><strong>{name}:</strong> {values.join(' | ')}</li>
-          ))}
-        </ul>
-      </details>
-      <div className="row" style={{ marginTop: 10 }}>
-        <strong>{statusLabel}</strong>
-        <strong>{assessment.riskScore}/100 estimate</strong>
-      </div>
-      <p className="muted">Authentication results are unverified header claims; this is not a probability.</p>
-      <div className="header-claims">
-        {(['spf', 'dkim', 'dmarc'] as const).map((method) => {
-          const claims = assessment.claims.filter((claim) => claim.method === method);
-          const reported = claims.length ? claims.map((claim) => claim.result.toUpperCase()).join(', ') : 'not reported';
-          return <p key={method} style={{ margin: '4px 0' }}>
-            <strong>{method.toUpperCase()}:</strong> {reported}
-            {claims.some((claim) => claim.result === 'pass') && ` · alignment ${assessment.alignment[method]}`}
-          </p>;
-        })}
-      </div>
-      <p className="muted">
-        Display name: {assessment.senderDisplayName ?? 'not found'} · From: {assessment.from ?? 'not found'} ·
-        Domain: {assessment.senderDomain ?? 'not found'}
-        {assessment.claimedBrand && ` · Claimed brand: ${assessment.claimedBrand}`}
-      </p>
-      <p className="muted">Reply-To: {assessment.replyTo ?? 'not found'} · Return-Path: {assessment.returnPath ?? 'not found'}</p>
-      <details>
-        <summary>Received route ({email.receivedRoute.length} hops)</summary>
-        {email.receivedRoute.length ? <ol className="header-claims">
-          {email.receivedRoute.map((hop, index) => (
-            <li key={`${index}-${hop.header}`}>
-              {hop.ipAddresses.length ? `IP address${hop.ipAddresses.length === 1 ? '' : 'es'}: ${hop.ipAddresses.join(', ')}` : 'No IP literal extracted'}
-              <div>{hop.header}</div>
-            </li>
-          ))}
-        </ol> : <p className="muted">No Received headers found.</p>}
-        <p className="muted">Header order and IP location are not proof of the sender's origin; these values are not geolocated.</p>
-      </details>
-      {assessment.claims.length > 0 ? (
-        <ul className="header-claims">
-          {assessment.claims.map((claim, index) => (
-            <li key={`${claim.source}-${claim.authservId}-${claim.method}-${index}`}>
-              {claim.method.toUpperCase()} {claim.result.toUpperCase()} reported by {claim.authservId}
-              {claim.identityDomain ? ` (${claim.identityDomain})` : ''}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="muted">No SPF/DKIM/DMARC results were found in the supplied headers.</p>
-      )}
-      {assessment.signals.length > 0 && (
-        <ul className="header-claims">
-          {assessment.signals.map((signal) => <li key={signal.id}>{signal.reason}</li>)}
-        </ul>
-      )}
-      <ul className="header-warnings">
-        {assessment.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-      </ul>
-      <EmailDetail label={`Plain text body (${email.plainText.length.toLocaleString()} characters)`} value={email.plainText} />
-      <EmailDetail label={`HTML body (${email.html.length.toLocaleString()} characters; inert text only)`} value={email.html} />
-      <details>
-        <summary>Links ({email.links.length})</summary>
-        {email.links.length ? <ul className="header-claims">
-          {email.links.map((link, index) => {
-            const verdict = scanUrl(link.url);
-            return (
-              <li key={`${link.url}-${link.source}-${index}`}>
-                {link.mismatch && <strong>Displayed link differs from target · </strong>}
-                {link.displayedText && `Shown: ${link.displayedText} · `}
-                <div>{link.source}: {link.url}</div>
-                <div>Local URL risk: {verdict.score}/100
-                  {verdict.signals.length > 0 && ` · ${verdict.signals.map((signal) => signal.reason).join('; ')}`}
-                </div>
-              </li>
-            );
-          })}
-        </ul> : <p className="muted">No web links found.</p>}
-      </details>
-      <details>
-        <summary>Images ({email.images.length}) and forms ({email.forms.length})</summary>
-        {email.images.length > 0 && <ul className="header-claims">{email.images.map((image, index) =>
-          <li key={`${image}-${index}`}>Image source: {image}</li>)}</ul>}
-        {email.forms.length > 0 && <ul className="header-claims">{email.forms.map((form, index) =>
-          <li key={`${form.action}-${index}`}>Form {form.method.toUpperCase()} → {form.action || '(no action)'}</li>)}</ul>}
-        {!email.images.length && !email.forms.length && <p className="muted">No image references or forms found.</p>}
-      </details>
-      <details>
-        <summary>Hidden text ({email.hiddenText.length})</summary>
-        {email.hiddenText.length ? <ul className="header-claims">
-          {email.hiddenText.map((text, index) => <li key={`${index}-${text}`}>{text}</li>)}
-        </ul> : <p className="muted">No hidden HTML text found.</p>}
-      </details>
-      <details>
-        <summary>Attachments ({email.attachments.length})</summary>
-        {email.attachments.length ? <ul className="header-claims">
-          {email.attachments.map((attachment, index) => (
-            <li key={`${attachment.sha256}-${index}`}>
-              {attachment.filename} · {attachment.extension || '(no extension)'} · {attachment.mimeType} · {attachment.size.toLocaleString()} bytes · SHA-256 {attachment.sha256}
-            </li>
-          ))}
-        </ul> : <p className="muted">No attachments found.</p>}
-        <p className="muted">Attachments were decoded for metadata and hashing only; they were not opened or executed.</p>
-      </details>
+        <ol className="email-detail-sections">
+          <li>
+            <h3>Sender and identity</h3>
+            <p className="muted">
+              Display name: {assessment.senderDisplayName ?? 'not found'} · From: {assessment.from ?? 'not found'} ·
+              Domain: {assessment.senderDomain ?? 'not found'}
+              {assessment.claimedBrand && ` · Claimed brand: ${assessment.claimedBrand}`}
+            </p>
+            <p className="muted">Reply-To: {assessment.replyTo ?? 'not found'} · Return-Path: {assessment.returnPath ?? 'not found'}</p>
+          </li>
+          <li>
+            <h3>Authentication results</h3>
+            <div className="row">
+              <strong>{statusLabel}</strong>
+              <strong>{assessment.riskScore}/100 risk estimate</strong>
+            </div>
+            <p className="muted">Authentication results are unverified header claims; this is not a probability.</p>
+            <div className="header-claims">
+              {(['spf', 'dkim', 'dmarc'] as const).map((method) => {
+                const claims = assessment.claims.filter((claim) => claim.method === method);
+                const reported = claims.length ? claims.map((claim) => claim.result.toUpperCase()).join(', ') : 'not reported';
+                return <p key={method} style={{ margin: '4px 0' }}>
+                  <strong>{method.toUpperCase()}:</strong> {reported}
+                  {claims.some((claim) => claim.result === 'pass') && ` · alignment ${assessment.alignment[method]}`}
+                </p>;
+              })}
+            </div>
+            {assessment.claims.length > 0 ? (
+              <ul className="header-claims">
+                {assessment.claims.map((claim, index) => (
+                  <li key={`${claim.source}-${claim.authservId}-${claim.method}-${index}`}>
+                    {claim.method.toUpperCase()} {claim.result.toUpperCase()} reported by {claim.authservId}
+                    {claim.identityDomain ? ` (${claim.identityDomain})` : ''}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">No SPF/DKIM/DMARC results were found in the supplied headers.</p>
+            )}
+          </li>
+          <li>
+            <h3>Warnings</h3>
+            {assessment.signals.length > 0 || assessment.warnings.length > 0 ? (
+              <>
+                {assessment.signals.length > 0 && <ul className="header-claims">
+                  {assessment.signals.map((signal) => <li key={signal.id}>{signal.reason}</li>)}
+                </ul>}
+                {assessment.warnings.length > 0 && <ul className="header-warnings">
+                  {assessment.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                </ul>}
+              </>
+            ) : <p className="muted">No additional header warnings.</p>}
+          </li>
+          <li>
+            <details>
+              <summary>Received route ({email.receivedRoute.length} hops)</summary>
+              {email.receivedRoute.length ? <ol className="header-claims">
+                {email.receivedRoute.map((hop, index) => (
+                  <li key={`${index}-${hop.header}`}>
+                    {hop.ipAddresses.length ? `IP address${hop.ipAddresses.length === 1 ? '' : 'es'}: ${hop.ipAddresses.join(', ')}` : 'No IP literal extracted'}
+                    <div>{hop.header}</div>
+                  </li>
+                ))}
+              </ol> : <p className="muted">No Received headers found.</p>}
+              <p className="muted">Header order and IP location are not proof of the sender&apos;s origin; these values are not geolocated.</p>
+            </details>
+          </li>
+          <li>
+            <details>
+              <summary>Links ({email.links.length})</summary>
+              {email.links.length ? <ul className="header-claims">
+                {email.links.map((link, index) => {
+                  const verdict = scanUrl(link.url);
+                  return (
+                    <li key={`${link.url}-${link.source}-${index}`}>
+                      {link.mismatch && <strong>Displayed link differs from target · </strong>}
+                      {link.displayedText && `Shown: ${link.displayedText} · `}
+                      <div>{link.source}: {link.url}</div>
+                      <div>Local URL risk: {verdict.score}/100
+                        {verdict.signals.length > 0 && ` · ${verdict.signals.map((signal) => signal.reason).join('; ')}`}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul> : <p className="muted">No web links found.</p>}
+            </details>
+          </li>
+          <li>
+            <details>
+              <summary>Images and forms ({email.images.length + email.forms.length})</summary>
+              {email.images.length > 0 && <ul className="header-claims">{email.images.map((image, index) =>
+                <li key={`${image}-${index}`}>Image source: {image}</li>)}</ul>}
+              {email.forms.length > 0 && <ul className="header-claims">{email.forms.map((form, index) =>
+                <li key={`${form.action}-${index}`}>Form {form.method.toUpperCase()} → {form.action || '(no action)'}</li>)}</ul>}
+              {!email.images.length && !email.forms.length && <p className="muted">No image references or forms found.</p>}
+            </details>
+          </li>
+          <li>
+            <details>
+              <summary>Hidden text ({email.hiddenText.length})</summary>
+              {email.hiddenText.length ? <ul className="header-claims">
+                {email.hiddenText.map((text, index) => <li key={`${index}-${text}`}>{text}</li>)}
+              </ul> : <p className="muted">No hidden HTML text found.</p>}
+            </details>
+          </li>
+          <li>
+            <details>
+              <summary>Attachments ({email.attachments.length})</summary>
+              {email.attachments.length ? <ul className="header-claims">
+                {email.attachments.map((attachment, index) => (
+                  <li key={`${attachment.sha256}-${index}`}>
+                    {attachment.filename} · {attachment.extension || '(no extension)'} · {attachment.mimeType} · {attachment.size.toLocaleString()} bytes · SHA-256 {attachment.sha256}
+                  </li>
+                ))}
+              </ul> : <p className="muted">No attachments found.</p>}
+              <p className="muted">Attachments were decoded for metadata and hashing only; they were not opened or executed.</p>
+            </details>
+          </li>
+          <li>
+            <h3>Message body</h3>
+            <EmailDetail label={`Plain text (${email.plainText.length.toLocaleString()} characters)`} value={email.plainText} />
+            <EmailDetail label={`HTML (${email.html.length.toLocaleString()} characters; inert text only)`} value={email.html} />
+          </li>
+          <li>
+            <details>
+              <summary>Raw headers ({email.headers.length})</summary>
+              <ul className="header-claims">
+                {email.headers.map(({ name, values }) => (
+                  <li key={name}><strong>{name}:</strong> {values.join(' | ')}</li>
+                ))}
+              </ul>
+            </details>
+          </li>
+        </ol>
       </details>
     </section>
   );
