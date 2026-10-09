@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DetectionEngine } from '../src/engine/core/detectionEngine';
-import type { Detector } from '../src/engine/core/detector';
+import type { Detector, ScanInput, ScanKind } from '../src/engine/core/detector';
 import { createDefaultEngine, scanPage, scanText, scanUrl } from '../src/engine';
 
 const stub = (id: string, handles: Detector['handles'], weight = 40): Detector => ({
@@ -15,10 +15,31 @@ describe('DetectionEngine', () => {
     expect(() => engine.register(stub('a', ['text']))).toThrow(/already registered/);
   });
 
+  it('rejects invalid detector metadata before registration', () => {
+    const engine = new DetectionEngine();
+    const noHandles = { id: 'no-handles', handles: [], analyze: () => [] };
+    const duplicateKinds = { id: 'duplicate-kinds', handles: ['url', 'url'], analyze: () => [] };
+    const invalidId = { id: 'bad id', handles: ['url'], analyze: () => [] };
+    const noAnalyzer = { id: 'no-analyzer', handles: ['url'] };
+
+    for (const detector of [noHandles, duplicateKinds, invalidId, noAnalyzer]) {
+      expect(() => engine.register(detector as unknown as Detector)).toThrow(TypeError);
+    }
+    expect(engine.list()).toEqual([]);
+  });
+
   it('runs only detectors that handle the input kind', () => {
     const engine = new DetectionEngine([stub('urlOnly', ['url'])]);
     expect(engine.scan({ kind: 'text', text: 'hello' }).signals).toHaveLength(0);
     expect(engine.scan({ kind: 'url', url: 'https://example.com' }).signals).toHaveLength(1);
+  });
+
+  it('rejects malformed scan input and detection rules', () => {
+    const engine = new DetectionEngine();
+
+    expect(() => engine.scan({ kind: 'url' } as unknown as ScanInput)).toThrow(/required string fields/);
+    expect(() => engine.scan({ kind: 'text', text: 'hello', rules: {} } as unknown as ScanInput)).toThrow(/rules schema/);
+    expect(() => engine.scan({ kind: 'unknown' } as unknown as ScanInput)).toThrow(/supported kind/);
   });
 
   it('isolates a crashing detector and still runs the others', () => {
@@ -34,7 +55,36 @@ describe('DetectionEngine', () => {
 
     expect(result.signals.map((s) => s.id)).toEqual(['good-signal']);
     expect(result.timings.find((t) => t.id === 'bad')?.failed).toBe(true);
+    expect(result.timings.find((t) => t.id === 'bad')?.failureReason).toBe('exception');
+    expect(result.failures).toEqual([{ detectorId: 'bad', reason: 'exception' }]);
     spy.mockRestore();
+  });
+
+  it('rejects malformed signals without discarding valid evidence from other detectors', () => {
+    const invalid: Detector = {
+      id: 'invalid-output',
+      handles: ['url'],
+      analyze: () => [{ id: 'bad-signal', weight: Number.NaN, reason: 'invalid weight' }],
+    };
+    const result = new DetectionEngine([invalid, stub('good', ['url'])])
+      .scan({ kind: 'url', url: 'https://example.com' });
+
+    expect(result.signals.map((signal) => signal.id)).toEqual(['good-signal']);
+    expect(result.timings.find((timing) => timing.id === 'invalid-output')).toMatchObject({
+      failed: true,
+      failureReason: 'invalid-output',
+      signals: 0,
+    });
+    expect(result.failures).toEqual([{ detectorId: 'invalid-output', reason: 'invalid-output' }]);
+  });
+
+  it('snapshots detector metadata when registering', () => {
+    const handles: ScanKind[] = ['url'];
+    const engine = new DetectionEngine([stub('snapshot', handles)]);
+    handles.push('text');
+
+    expect(engine.scan({ kind: 'text', text: 'hello' }).signals).toHaveLength(0);
+    expect(engine.scan({ kind: 'url', url: 'https://example.com' }).signals).toHaveLength(1);
   });
 
   it('reports total and per-detector timing', () => {
@@ -42,6 +92,7 @@ describe('DetectionEngine', () => {
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
     expect(result.timings).toHaveLength(1);
     expect(result.timings[0].signals).toBe(1);
+    expect(result.failures).toEqual([]);
   });
 
   it('lists detectors in registration order', () => {

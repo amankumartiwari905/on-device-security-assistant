@@ -18,7 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sensitivity: 'medium',
   allowlist: [],
   scanPageText: true,
-  onlineEmailChecks: true,
+  onlineEmailChecks: false,
   onlineUrlChecks: false,
   googleSafeBrowsingKey: '',
   virusTotalKey: '',

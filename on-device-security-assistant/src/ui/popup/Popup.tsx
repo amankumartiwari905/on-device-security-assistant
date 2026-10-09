@@ -2,9 +2,13 @@ import { useEffect, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { combineSignals, scanUrl } from '../../engine';
 import type { Verdict } from '../../engine';
+import { analyzePhishingText } from '../../engine/ml/modelRunner';
+import type { PhishingModelPrediction } from '../../engine/ml/modelRunner';
 import { getSettings, saveSettings } from '../../storage/settings';
 import { getDetectionRules } from '../../storage/detectionRules';
 import { clearHistory, getHistory } from '../../storage/history';
+import { DEFAULT_DETECTION_RULES, type DetectionRules } from '../../engine/url/rules';
+import { linkTextClaimsDifferentSite } from '../../engine/url/linkText';
 import type { HistoryItem } from '../../storage/history';
 import type { AnalyzeMessageResponse, ThreatExplanation } from '../../shared/messages';
 import type { PageLinkAssessment, PageLinksResponse } from '../../shared/messages';
@@ -15,6 +19,34 @@ import type { CheckUrlReputationResponse } from '../../shared/messages';
 import type { UrlReputationProvider, UrlReputationReport } from '../../shared/urlReputation';
 import { VerdictCard } from '../components/VerdictCard';
 
+async function inspectPageLinks(tabId: number, rules: DetectionRules): Promise<PageLinkAssessment[]> {
+  const [injection] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => [...document.querySelectorAll<HTMLAnchorElement>('a[href]')]
+      .map((anchor) => ({ url: anchor.href, text: (anchor.textContent ?? '').trim().slice(0, 160) }))
+      .filter((link) => /^https?:/i.test(link.url)),
+  });
+
+  return (injection?.result ?? []).flatMap(({ url, text }) => {
+    let verdict = scanUrl(url, rules);
+    if (verdict.level === 'safe' && !linkTextClaimsDifferentSite(text, url)) return [];
+    if (linkTextClaimsDifferentSite(text, url)) {
+      verdict = {
+        ...verdict,
+        ...combineSignals([
+          ...verdict.signals,
+          {
+            id: 'link-text-mismatch',
+            weight: 35,
+            reason: 'The link text shows a different site than where it actually goes',
+          },
+        ]),
+      };
+    }
+    return [{ url, text, verdict }];
+  });
+}
+
 function timeAgo(ms: number): string {
   const mins = Math.max(0, Math.round((Date.now() - ms) / 60000));
   if (mins < 1) return 'just now';
@@ -24,6 +56,7 @@ function timeAgo(ms: number): string {
 }
 
 export function Popup() {
+  const [popupSize, setPopupSize] = useState(1);
   const [enabled, setEnabled] = useState(true);
   const [onlineUrlChecks, setOnlineUrlChecks] = useState(false);
   const [tabUrl, setTabUrl] = useState('');
@@ -32,6 +65,7 @@ export function Popup() {
   const [pageLinksError, setPageLinksError] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [textVerdict, setTextVerdict] = useState<Verdict | null>(null);
+  const [textModel, setTextModel] = useState<Extract<AnalyzeMessageResponse, { verdict: Verdict }>['model'] | null>(null);
   const [textExplanation, setTextExplanation] = useState<ThreatExplanation | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,6 +74,7 @@ export function Popup() {
   const [analysisStatus, setAnalysisStatus] = useState<string | null>(null);
   const [emailSource, setEmailSource] = useState('');
   const [emailAnalysis, setEmailAnalysis] = useState<ParsedEmail | null>(null);
+  const [emailModel, setEmailModel] = useState<Extract<AnalyzeMessageResponse, { verdict: Verdict }>['model'] | null>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [urlReports, setUrlReports] = useState<Record<string, UrlReputationReport> | null>(null);
   const [urlError, setUrlError] = useState<string | null>(null);
@@ -74,17 +109,35 @@ export function Popup() {
         if (tab?.url && /^https?:/i.test(tab.url)) {
           setTabUrl(tab.url);
           setPageVerdict(scanUrl(tab.url, rules));
-          if (tab.id !== undefined) {
-            void chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_LINKS' })
+          const tabId = tab.id;
+          if (tabId !== undefined) {
+            const useScriptingFallback = (cause: unknown) => {
+              console.warn('[AI Guard] content-script link inspection failed; using scripting fallback', cause);
+              void inspectPageLinks(tabId, rules ?? DEFAULT_DETECTION_RULES)
+                .then((links) => {
+                  if (!cancelled) {
+                    setPageLinks(links);
+                    setPageLinksError(null);
+                  }
+                })
+                .catch((fallbackError: unknown) => {
+                  if (cancelled) return;
+                  console.error('[AI Guard] could not inspect page links', fallbackError);
+                  setPageLinksError('Could not inspect links on this page. Reload the page and try again.');
+                });
+            };
+            void chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_LINKS' })
               .then((response: PageLinksResponse) => {
                 if (cancelled) return;
-                if ('error' in response) setPageLinksError(response.error);
-                else setPageLinks(response.links);
+                if ('error' in response) useScriptingFallback(response.error);
+                else {
+                  setPageLinks(response.links);
+                  setPageLinksError(null);
+                }
               })
               .catch((error: unknown) => {
                 if (cancelled) return;
-                console.warn('[AI Guard] could not request page link analysis', error);
-                setPageLinksError('Could not inspect links on this page. Reload the page and try again.');
+                useScriptingFallback(error);
               });
           }
         }
@@ -116,7 +169,10 @@ export function Popup() {
   const analyzeMessage = async (intent: 'automatic' | 'explain') => {
     setAnalyzingMessage(true);
     setAnalysisStatus(intent === 'explain' ? 'Running local checks and asking Qwen for an explanation...' : 'Running local checks...');
-    if (intent === 'automatic') setTextVerdict(null);
+    if (intent === 'automatic') {
+      setTextVerdict(null);
+      setTextModel(null);
+    }
     setTextExplanation(null);
     try {
       const response: AnalyzeMessageResponse = await chrome.runtime.sendMessage({
@@ -128,8 +184,9 @@ export function Popup() {
         setAnalysisStatus(response.error);
       } else {
         setTextVerdict(response.verdict);
+        setTextModel(response.model);
         setTextExplanation(response.explanation);
-        setAnalysisStatus(response.ollama.message);
+        setAnalysisStatus(`${response.model.message} ${response.ollama.message}`);
       }
     } catch (error) {
       console.error('[AI Guard] could not request message analysis', error);
@@ -141,12 +198,35 @@ export function Popup() {
 
   const analyzeEmail = async (rawEmail: string) => {
     try {
-      setEmailAnalysis(await parseEml(rawEmail));
+      const parsed = await parseEml(rawEmail);
+      setEmailAnalysis(parsed);
+      const subject = parsed.headers
+        .find((header) => header.name.toLowerCase() === 'subject')
+        ?.values.join(' ') ?? '';
+      const modelText = [subject, parsed.plainText, ...parsed.hiddenText, ...parsed.links.map((link) => link.url)]
+        .filter(Boolean)
+        .join('\n')
+        .slice(0, 20_000);
+      try {
+        const prediction = await analyzePhishingText(modelText);
+        setEmailModel({
+          status: 'analyzed',
+          message: 'On-device phishing model analysis complete.',
+          ...prediction,
+        });
+      } catch (error) {
+        console.warn('[AI Guard] On-device email model unavailable; using local scan.', error);
+        setEmailModel({
+          status: 'unavailable',
+          message: 'On-device phishing model unavailable; email indicators remain available.',
+        });
+      }
       setUrlReports(null);
       setUrlError(null);
       setEmailError(null);
     } catch (error) {
       setEmailAnalysis(null);
+      setEmailModel(null);
       setEmailError(error instanceof Error ? error.message : 'Could not analyze this email.');
     }
   };
@@ -156,6 +236,7 @@ export function Popup() {
     const file = input.files?.[0];
     if (!file) return;
     setEmailAnalysis(null);
+    setEmailModel(null);
     setEmailError(null);
     if (file.size > MAX_EML_SIZE) {
       setEmailError(`Choose an .eml file no larger than ${MAX_EML_SIZE.toLocaleString()} bytes.`);
@@ -195,10 +276,32 @@ export function Popup() {
   };
 
   return (
-    <div className="popup">
+    <div className="popup" data-size={popupSize}>
       <div className="row popup-header">
         <h1>AI Guard</h1>
         <div className="popup-header-actions">
+          <div className="popup-size-controls" role="group" aria-label="Popup size">
+            <button
+              className="secondary popup-size-button"
+              type="button"
+              aria-label="Decrease popup size"
+              title="Decrease popup size"
+              disabled={popupSize === 0}
+              onClick={() => setPopupSize((size) => Math.max(0, size - 1))}
+            >
+              −
+            </button>
+            <button
+              className="secondary popup-size-button"
+              type="button"
+              aria-label="Increase popup size"
+              title="Increase popup size"
+              disabled={popupSize === 2}
+              onClick={() => setPopupSize((size) => Math.min(2, size + 1))}
+            >
+              +
+            </button>
+          </div>
           <button className="secondary popup-settings" onClick={() => chrome.runtime.openOptionsPage()}>
             Settings
           </button>
@@ -253,6 +356,7 @@ export function Popup() {
             onChange={(e) => {
               setText(e.target.value);
               setTextVerdict(null);
+              setTextModel(null);
               setTextExplanation(null);
               setAnalysisStatus(null);
             }}
@@ -265,6 +369,7 @@ export function Popup() {
           {analysisStatus && <p className="muted" role="status">{analysisStatus}</p>}
           {textVerdict && (
             <>
+              {textModel && <ModelPrediction model={textModel} />}
               <VerdictCard verdict={textVerdict} />
               <button
                 className="secondary"
@@ -300,6 +405,7 @@ export function Popup() {
             onChange={(event) => {
               setEmailSource(event.target.value);
               setEmailAnalysis(null);
+              setEmailModel(null);
               setEmailError(null);
               setUrlReports(null);
               setUrlError(null);
@@ -319,6 +425,7 @@ export function Popup() {
           {emailError && <p className="muted" role="alert">{emailError}</p>}
           {emailAnalysis && (
             <>
+              {emailModel && <ModelPrediction model={emailModel} />}
               <EmailAnalysisResult email={emailAnalysis} />
               <button className="secondary" onClick={() => void checkEmailLinks()}
                 disabled={!onlineUrlChecks || checkingUrls || emailAnalysis.links.length === 0}>
@@ -355,6 +462,48 @@ export function Popup() {
         </div>
       </details>
     </div>
+  );
+}
+
+function ModelPrediction({
+  model,
+}: {
+  model: Extract<AnalyzeMessageResponse, { verdict: Verdict }>['model'];
+}) {
+  if (model.status !== 'analyzed') {
+    return (
+      <section className="card model-prediction" aria-label="ML prediction">
+        <strong>ML prediction</strong>
+        <p className="muted">{model.message}</p>
+      </section>
+    );
+  }
+
+  const probability = Math.round(model.probability * 100);
+  const predictionLabel = {
+    LEGITIMATE: 'Likely legitimate',
+    SUSPICIOUS: 'Suspicious',
+    PHISHING: 'Likely phishing',
+  }[model.prediction];
+
+  return (
+    <section className={`card model-prediction model-${model.risk.toLowerCase()}`} aria-label="ML prediction">
+      <div className="row">
+        <strong>ML prediction</strong>
+        <strong>{predictionLabel}</strong>
+      </div>
+      <div className="row model-probability-label">
+        <span>Estimated phishing probability</span>
+        <strong>{probability}%</strong>
+      </div>
+      <progress
+        className="model-probability"
+        value={probability}
+        max={100}
+        aria-label="Estimated phishing probability"
+      />
+      <p className="muted model-note">Model estimate, not proof that a message is malicious.</p>
+    </section>
   );
 }
 

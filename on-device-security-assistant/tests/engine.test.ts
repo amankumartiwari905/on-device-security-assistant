@@ -73,6 +73,7 @@ describe('URL scanning', () => {
     const verdict = scanUrl('https://paypa1.com/login');
     expect(verdict.level).not.toBe('safe');
     expect(verdict.signals.some((signal) => signal.id === 'homoglyph')).toBe(true);
+    expect(verdict.reasons).toContain('Domain uses visually similar characters to imitate paypal');
   });
 
   it('detects common brand spoofs offline', () => {

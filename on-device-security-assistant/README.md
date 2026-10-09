@@ -1,33 +1,70 @@
 # AI Guard
 
-Phishing and scam protection (Chrome MV3). Detection runs locally. When enabled, email reputation checks send up to five valid addresses per page to EmailRep.io; Google DNS receives the domain only. Raw email headers and message bodies are analyzed locally and never sent to those providers. Optional message explanation is sent to a local Ollama instance on `localhost`.
+Phishing and scam protection (Chrome MV3). URL, message, and email checks run on-device by default. The bundled ONNX phishing model analyzes message and email text; URL checks use local TypeScript rules. Online reputation checks are off by default; if enabled, email reputation checks can send up to five valid addresses per page to EmailRep.io and Google DNS receives the domain. Raw email headers and message bodies are analyzed locally and never sent to those providers. Optional message explanation is sent to a local Ollama instance on `localhost`.
 
 ## Develop
     npm install
     npm run demo       # offline demo at http://127.0.0.1:5000/
     npm run build     # typecheck + build popup/warning/options/background + content script
     npm test          # unit tests for the security engine
+    npm run test:model # run the bundled ONNX model on sample messages
 
 Load `dist/` via chrome://extensions > Developer mode > Load unpacked. After changes: rebuild, then reload the extension.
 
 ## Layout
-- `src/engine`      pure TypeScript detection (url, domain, nlp, scoring, ml hook)
+- `src/engine`      TypeScript detection (URL, domain, text, scoring) and ONNX ML inference
 - `src/background`  navigation blocking, badge, allow-once, Ollama threat router
 - `src/content`     in-page link marking and scam-text banner
 - `src/ui`          React popup, warning screen, options
-- `ml/`             Python training work; no ONNX model is currently bundled
+- `ml/`             Python model export and training work
+- `public/models/`  browser-bundled ONNX phishing model
 
-## Optional local Ollama message analysis
+## On-device phishing model and optional Ollama explanation
 
-The popup runs the local rules scan first. Qwen is triggered automatically when
-the local risk score is elevated (30/100 or higher), or on any score when the
-user selects **Why is this suspicious?**. The worker sends Qwen the pasted text
-along with structured local evidence (risk score, risk level, reasons, and
-detector indicators). Mode-specific system prompts require a concise,
-evidence-based JSON explanation. Qwen does not change the local verdict or score.
-If Ollama is not running or returns an invalid response, the popup clearly
-reports that only the local scan is available. Requests go to
-`http://localhost:11434/api/chat`.
+Message and email checks run the local TypeScript detection rules and the
+bundled ONNX model. The ONNX model contains the project's trained TF-IDF
+vectorizer and calibrated SVM; the browser performs inference locally and does
+not call FastAPI. Email inference uses the subject, extracted plain and hidden
+body text, and extracted links. Model probability adds evidence to (and cannot
+suppress) the local rules result. If model inference is unavailable, the
+TypeScript rules remain available and the UI reports the model status.
+
+To regenerate `public/models/phishing-text.onnx` from the committed model
+artifacts, use Python 3.13 or earlier, install `ml/requirements.txt`, then run:
+
+    python ml/export_phishing_model.py
+
+The export validates ONNX probabilities against the sklearn model before
+writing the browser asset. To validate the browser model artifact directly,
+run `npm run test:model`. The browser includes the model and ONNX Runtime Web
+WASM asset in `dist/`; no separate inference service is required.
+
+Qwen is triggered automatically when the combined risk score is elevated
+(30/100 or higher), or on any score when the user selects **Why is this
+suspicious?**. The worker sends Qwen the pasted text along with structured
+assessment evidence (risk score, risk level, reasons, and detector indicators).
+Qwen's explanation does not change the verdict or score. Requests go to the
+local Ollama API at `http://localhost:11434/api/chat`.
+
+The standalone FastAPI service remains available for API development. It is
+not part of the extension's inference path. Use Python 3.13 or earlier; its
+pinned scikit-learn version (1.6.1) matches the committed serialized model
+artifacts:
+
+1. From `backend/`, install dependencies from `requirements.txt`.
+2. Start the service bound to loopback: `uvicorn main:app --host 127.0.0.1 --port 8000`.
+3. Keep the supplied model files under `backend/models/`; restart the service
+   after any model changes.
+
+New installations use **Off** privacy mode and keep automatic online email
+checks disabled. The on-device rules and ONNX model run in every mode.
+**Domains** mode may send extracted website domains to registration/DNS
+services. **Full** mode also allows local Ollama explanations and configured
+EmailRep lookups. **Off** mode makes no enrichment or Ollama requests.
+Automatic email reputation checks additionally require enabling their separate
+setting, and send addresses only in **Full** mode.
+
+To enable Ollama explanations:
 
 1. Install Ollama and download the model: `ollama pull qwen3.5:4b`.
 2. Start Ollama locally, then rebuild and reload the extension.
@@ -35,10 +72,10 @@ reports that only the local scan is available. Requests go to
    `chrome-extension://<extension-id>` origin to Ollama's `OLLAMA_ORIGINS` and
    restart Ollama. Find the extension ID at `chrome://extensions`.
 
-The extension grants access only to the Ollama API on localhost/127.0.0.1 port
-11434. Page navigation checks remain local and do not call Ollama. ONNX inference
-is not enabled yet: the existing ML module is a placeholder and there is no
-bundled model or ONNX Runtime dependency.
+The extension needs local API access only for Ollama on port 11434. The
+FastAPI service under `backend/` remains a standalone reference/development
+service; the extension does not call it. Page navigation checks and message
+and email ML inference run locally.
 
 ## Verify an email message
 
@@ -69,8 +106,9 @@ evidence only and cannot authenticate a particular message.
 
 ## Online email reputation checks
 
-Online email reputation checks are enabled by default and can be disabled in
-extension settings. When scanning a page, the content script submits at most five
+Online email reputation checks are disabled by default and can be enabled in
+extension settings. They run only in **Full** privacy mode. When enabled and
+scanning a page, the content script submits at most five
 valid distinct addresses to the extension service worker. EmailRep.io receives
 the full address and provides reputation signals, first/last-seen information,
 and an estimated domain age when available. Google DNS receives the domain for

@@ -1,12 +1,12 @@
 import { combineSignals, scanText } from '../engine';
 import type { Signal, Verdict } from '../engine';
+import { analyzePhishingText } from '../engine/ml/modelRunner';
+import type { PhishingModelPrediction } from '../engine/ml/modelRunner';
 import type { AnalysisIntent, ThreatExplanation } from '../shared/messages';
 import type { DetectionRules } from '../engine/url/rules';
 import { extractUrls, hostOf } from '../engine/nlp/linkAnalysis';
 import { urlDomainSignals, shouldEnrich } from './intel/urlIntel';
 import type { IntelMode } from './intel/intelSettings';
-
-const FASTAPI_DETECT_URL = 'http://127.0.0.1:8000/api/detect';
 
 const OLLAMA_CHAT_URL = 'http://localhost:11434/api/chat';
 const OLLAMA_MODEL = 'qwen3.5:4b';
@@ -19,6 +19,15 @@ export interface ThreatAnalysis {
   verdict: Verdict;
   explanation: ThreatExplanation | null;
   trigger: 'risk-threshold' | 'user-request' | 'not-triggered';
+  model:
+    | {
+        status: 'analyzed';
+        message: string;
+        prediction: PhishingModelPrediction['prediction'];
+        probability: number;
+        risk: PhishingModelPrediction['risk'];
+      }
+    | { status: 'unavailable'; message: string };
   ollama: {
     status: 'analyzed' | 'unavailable' | 'skipped';
     message: string;
@@ -186,6 +195,19 @@ async function analyzeWithOllama(
   }
 }
 
+function addPhishingModelSignal(verdict: Verdict, result: PhishingModelPrediction): Verdict {
+  const modelSignal: Signal = {
+    id: 'phishing-model',
+    weight: Math.round(result.probability * 100),
+    reason: `Local ML model classified this message as ${result.prediction} (${(result.probability * 100).toFixed(2)}% estimated phishing probability)`,
+  };
+  const combined = combineSignals([...verdict.signals, modelSignal]);
+
+  // The model is additional evidence: it may raise risk, but never suppress a local finding.
+  if (combined.score >= verdict.score) return combined;
+  return verdict;
+}
+
 export async function routeMessageAnalysis(
   text: string,
   rules: DetectionRules,
@@ -194,7 +216,13 @@ export async function routeMessageAnalysis(
 ): Promise<ThreatAnalysis> {
   const input = text.trim();
 
-<<<<<<< HEAD
+  if (input.length === 0) {
+    throw new Error('Enter a message to analyze.');
+  }
+  if (input.length > MAX_MESSAGE_LENGTH) {
+    throw new Error(`Messages must be ${MAX_MESSAGE_LENGTH.toLocaleString()} characters or fewer.`);
+  }
+
   const initialVerdict = scanText(input, rules);
   let localVerdict: Verdict = initialVerdict;
   if (shouldEnrich(initialVerdict.score) && privacyMode !== 'off') {
@@ -209,114 +237,34 @@ export async function routeMessageAnalysis(
     );
     localVerdict = combineSignals([...initialVerdict.signals, ...domainSignals]);
   }
+  let detectedVerdict = localVerdict;
+  let model: ThreatAnalysis['model'] = {
+    status: 'unavailable',
+    message: 'On-device phishing model unavailable; using local rules only.',
+  };
+  try {
+    const modelResult = await analyzePhishingText(input);
+    detectedVerdict = addPhishingModelSignal(localVerdict, modelResult);
+    model = {
+      status: 'analyzed',
+      message: 'On-device phishing model analysis complete.',
+      ...modelResult,
+    };
+  } catch (error) {
+    console.warn('[AI Guard] On-device phishing model unavailable; using local scan.', error);
+  }
+
   const trigger = intent === 'explain'
     ? 'user-request'
-    : localVerdict.score >= QWEN_TRIGGER_SCORE
+    : detectedVerdict.score >= QWEN_TRIGGER_SCORE
       ? 'risk-threshold'
       : 'not-triggered';
-=======
-  if (input.length === 0) {
-    throw new Error('Enter a message to analyze.');
-  }
-
-  if (input.length > MAX_MESSAGE_LENGTH) {
-    throw new Error(
-      `Messages must be ${MAX_MESSAGE_LENGTH.toLocaleString()} characters or fewer.`,
-    );
-  }
-
-  // Keep the existing local scanner as a fallback/additional signal.
-  const localVerdict = scanText(input, rules);
-
-  // The FastAPI ML result will become the primary verdict
-  // when the backend is available.
-  let detectedVerdict = localVerdict;
-
-  try {
-    const response = await fetch(
-      FASTAPI_DETECT_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-
-        body: JSON.stringify({
-          text: input,
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `FastAPI returned HTTP ${response.status}.`,
-      );
-    }
-
-    const result = (await response.json()) as {
-      prediction:
-        | 'LEGITIMATE'
-        | 'SUSPICIOUS'
-        | 'PHISHING';
-
-      probability: number;
-
-      risk:
-        | 'LOW'
-        | 'SUSPICIOUS'
-        | 'HIGH';
-    };
-
-    const mlLevel: Verdict['level'] =
-      result.risk === 'HIGH'
-        ? 'dangerous'
-        : result.risk === 'SUSPICIOUS'
-          ? 'suspicious'
-          : 'safe';
-
-    detectedVerdict = {
-      ...localVerdict,
-
-      // Verdict.score in the existing extension is
-      // represented on a 0-100 scale.
-      score: result.probability * 100,
-
-      level: mlLevel,
-
-      reasons: [
-        `ML classification: ${result.prediction}.`,
-        `Phishing probability: ${(result.probability * 100).toFixed(2)}%.`,
-        ...localVerdict.reasons.slice(0, 1),
-      ],
-    };
-
-    console.info(
-      '[AI Guard] FastAPI ML detection:',
-      result,
-    );
-  } catch (error) {
-    console.warn(
-      '[AI Guard] FastAPI ML detection unavailable; using local scan.',
-      error,
-    );
-  }
-
-  const trigger =
-    intent === 'explain'
-      ? 'user-request'
-      : detectedVerdict.score >= QWEN_TRIGGER_SCORE
-        ? 'risk-threshold'
-        : 'not-triggered';
-
->>>>>>> f2eec336cdcc4174dbe10ec09c0bb52fc91b119f
   if (trigger === 'not-triggered') {
     return {
       verdict: detectedVerdict,
-
       explanation: null,
-
       trigger,
-
+      model,
       ollama: {
         status: 'skipped',
         message:
@@ -326,9 +274,10 @@ export async function routeMessageAnalysis(
   }
   if (privacyMode === 'off') {
     return {
-      verdict: localVerdict,
+      verdict: detectedVerdict,
       explanation: null,
       trigger,
+      model,
       ollama: { status: 'skipped', message: 'Privacy mode is off; only the on-device scan was run.' },
     };
   }
@@ -344,9 +293,8 @@ export async function routeMessageAnalysis(
       verdict: detectedVerdict,
 
       explanation,
-
       trigger,
-
+      model,
       ollama: {
         status: 'analyzed',
         message: `Evidence explained locally with ${OLLAMA_MODEL} via Ollama.`,
@@ -366,12 +314,11 @@ export async function routeMessageAnalysis(
       verdict: detectedVerdict,
 
       explanation: null,
-
       trigger,
-
+      model,
       ollama: {
         status: 'unavailable',
-        message: `Ollama unavailable; showing ML/local scan only. ${detail}`,
+        message: `Ollama unavailable; showing available scan results only. ${detail}`,
       },
     };
   }

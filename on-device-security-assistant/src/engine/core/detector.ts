@@ -9,14 +9,17 @@ export type ScanInput =
 
 export type ScanKind = ScanInput['kind'];
 
+export type ScanInputFor<K extends ScanKind> = Extract<ScanInput, { kind: K }>;
+
 /**
  * A detector turns an input into evidence (signals). It never decides the final
  * verdict; the risk scorer combines signals from all detectors.
  */
-export interface Detector {
+export interface Detector<K extends ScanKind = ScanKind> {
   /** Unique, stable id. Used for registration and diagnostics. */
   readonly id: string;
   /** Input kinds this detector understands. The engine skips it for other kinds. */
-  readonly handles: readonly ScanKind[];
-  analyze(input: ScanInput): Signal[];
+  readonly handles: readonly K[];
+  /** Receives only an input kind listed in `handles`. */
+  analyze(input: ScanInputFor<K>): Signal[];
 }

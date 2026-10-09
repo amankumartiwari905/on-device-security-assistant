@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { DEFAULT_SETTINGS, getSettings, saveSettings } from '../../storage/settings';
 import type { Sensitivity, Settings } from '../../storage/settings';
+import { DEFAULT_INTEL_SETTINGS, getIntelSettings, saveIntelSettings } from '../../background/intel/intelSettings';
+import type { IntelMode } from '../../background/intel/intelSettings';
 import {
   formatDetectionRules,
   getDetectionRules,
@@ -12,14 +14,16 @@ import { DEFAULT_DETECTION_RULES } from '../../engine/url/rules';
 
 export function Options() {
   const [s, setS] = useState<Settings>(DEFAULT_SETTINGS);
+  const [intelMode, setIntelMode] = useState<IntelMode>(DEFAULT_INTEL_SETTINGS.mode);
   const [allowText, setAllowText] = useState('');
   const [ruleText, setRuleText] = useState<DetectionRuleText>(formatDetectionRules(DEFAULT_DETECTION_RULES));
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([getSettings(), getDetectionRules()]).then(([cur, rules]) => {
+    Promise.all([getSettings(), getIntelSettings(), getDetectionRules()]).then(([cur, intel, rules]) => {
       setS(cur);
+      setIntelMode(intel.mode);
       setAllowText(cur.allowlist.join('\n'));
       setRuleText(formatDetectionRules(rules));
     });
@@ -37,6 +41,7 @@ export function Options() {
       const detectionRules = parseDetectionRuleText(ruleText);
       await Promise.all([
         saveSettings({ ...s, allowlist }),
+        saveIntelSettings({ mode: intelMode }),
         saveDetectionRules(detectionRules),
       ]);
       setSaved(true);
@@ -54,6 +59,28 @@ export function Options() {
       <label>
         <input type="checkbox" checked={s.enabled} onChange={(e) => update({ enabled: e.target.checked })} /> Protection enabled
       </label>
+
+      <h2>Online enrichment privacy</h2>
+      <label>
+        Privacy mode{' '}
+        <select
+          value={intelMode}
+          onChange={(e) => {
+            setIntelMode(e.target.value as IntelMode);
+            setSaved(false);
+            setSaveError(null);
+          }}
+        >
+          <option value="off">Off — local checks only</option>
+          <option value="domains">Domains — send domain names only</option>
+          <option value="full">Full — allow configured online and local-model checks</option>
+        </select>
+      </label>
+      <p className="muted">
+        Off is the default and makes no enrichment requests. Domains may send website domains to registration and DNS
+        services. Full enables the optional local phishing and explanation services; automatic EmailRep checks still
+        require the separate setting below.
+      </p>
 
       <label>
         <input
@@ -73,9 +100,9 @@ export function Options() {
         Check email addresses online automatically
       </label>
       <p className="muted">
-        When enabled, up to 5 valid addresses found on each page are sent to EmailRep.io for reputation checks.
-        Google DNS receives the email domain only to inspect MX, SPF, and DMARC records. Results are cached temporarily in memory; disable this
-        option to keep email reputation checks local-only.
+        When enabled in Full privacy mode, up to 5 valid addresses found on each page are sent to EmailRep.io for
+        reputation checks. Google DNS receives the email domain to inspect MX, SPF, and DMARC records. This is
+        disabled by default; leave it off to keep email checks local-only.
       </p>
 
       <h2>Online URL reputation providers</h2>

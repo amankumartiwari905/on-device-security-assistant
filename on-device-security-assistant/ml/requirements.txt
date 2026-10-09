@@ -1,6 +1,6 @@
 numpy
 pandas
-scikit-learn
-skl2onnx
-onnx
-onnxruntime
+scikit-learn==1.6.1
+skl2onnx==1.19.1
+onnx==1.19.1
+onnxruntime==1.24.3

@@ -33,6 +33,15 @@ export type AnalyzeMessageResponse =
       verdict: Verdict;
       explanation: ThreatExplanation | null;
       trigger: 'risk-threshold' | 'user-request' | 'not-triggered';
+      model:
+        | {
+            status: 'analyzed';
+            message: string;
+            prediction: 'LEGITIMATE' | 'SUSPICIOUS' | 'PHISHING';
+            probability: number;
+            risk: 'LOW' | 'SUSPICIOUS' | 'HIGH';
+          }
+        | { status: 'unavailable'; message: string };
       ollama: { status: 'analyzed' | 'unavailable' | 'skipped'; message: string };
     }
   | { error: string };

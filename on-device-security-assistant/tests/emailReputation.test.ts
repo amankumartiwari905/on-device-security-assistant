@@ -4,6 +4,15 @@ import { addOnlineReputation, analyzePageEmails } from '../src/engine/email/emai
 
 beforeEach(async () => {
   await clearReputationCaches();
+  vi.stubGlobal('chrome', {
+    storage: {
+      local: {
+        get: vi.fn().mockResolvedValue({
+          intelSettings: { mode: 'full', emailRepApiKey: '' },
+        }),
+      },
+    },
+  });
 });
 
 afterEach(() => {
@@ -12,6 +21,26 @@ afterEach(() => {
 });
 
 describe('checkEmailReputations', () => {
+  it('does not contact online providers when privacy mode is off', async () => {
+    vi.stubGlobal('chrome', {
+      storage: {
+        local: {
+          get: vi.fn().mockResolvedValue({
+            intelSettings: { mode: 'off', emailRepApiKey: '' },
+          }),
+        },
+      },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await checkEmailReputations(['private@example.test']);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result['private@example.test'].status).toBe('unavailable');
+    expect(result['private@example.test'].emailRep.error).toBe('Online checks are turned off.');
+  });
+
   it('combines email reputation, MX, SPF, and DMARC data without changing provider claims', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

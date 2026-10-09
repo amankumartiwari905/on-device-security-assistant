@@ -1,10 +1,11 @@
-import { levelFor, scanPage, scanUrl } from '../engine';
+import { combineSignals, levelFor, scanPage, scanUrl } from '../engine';
 import type { ScanResult, Verdict } from '../engine';
 import { analyzePageEmails } from '../engine/email/emailAnalyzer';
 import type { EmailAssessment, EmailStatus } from '../engine/email/emailAnalyzer';
 import { getSettings } from '../storage/settings';
 import { getDetectionRules } from '../storage/detectionRules';
 import type { Message } from '../shared/messages';
+import { linkTextClaimsDifferentSite } from '../engine/url/linkText';
 
 const SCANNED = 'data-aiguard';
 const EMAIL_PANEL_ID = 'aiguard-emails';
@@ -20,20 +21,6 @@ function flagLink(a: HTMLAnchorElement, level: 'suspicious' | 'dangerous', messa
   a.title = `AI Guard: ${message}`;
 }
 
-/** Link text shows one site (paypal.com) but the href goes somewhere else. */
-function textLooksLikeDifferentSite(a: HTMLAnchorElement): boolean {
-  const shown = (a.textContent ?? '').trim();
-  const m = shown.match(/^(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?:[/?#]|$)/i);
-  if (!m) return false;
-  try {
-    const real = new URL(a.href).hostname.replace(/^www\./, '');
-    const claimed = m[1].toLowerCase().replace(/^www\./, '');
-    return real !== claimed && !real.endsWith(`.${claimed}`);
-  } catch {
-    return false;
-  }
-}
-
 function scanLinks(): void {
   document.querySelectorAll<HTMLAnchorElement>(`a[href]:not([${SCANNED}])`).forEach((a) => {
     a.setAttribute(SCANNED, '1');
@@ -42,7 +29,7 @@ function scanLinks(): void {
     const v = scanUrl(a.href);
     if (v.level !== 'safe') {
       flagLink(a, v.level, `${v.level} link. ${v.reasons[0] ?? ''}`);
-    } else if (textLooksLikeDifferentSite(a)) {
+    } else if (linkTextClaimsDifferentSite(a.textContent ?? '', a.href)) {
       flagLink(a, 'suspicious', 'The link text shows a different site than where it actually goes');
     }
   });
@@ -61,10 +48,25 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
       const anchors = new Map<string, string>();
       document.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((anchor) => {
         if (!/^https?:/i.test(anchor.href) || uniqueLinks.has(anchor.href)) return;
-        const verdict = scanUrl(anchor.href, rules);
-        if (verdict.level === 'safe' && !textLooksLikeDifferentSite(anchor)) return;
+        let verdict = scanUrl(anchor.href, rules);
+        const text = (anchor.textContent ?? '').trim().slice(0, 160);
+        const textMismatch = linkTextClaimsDifferentSite(text, anchor.href);
+        if (verdict.level === 'safe' && !textMismatch) return;
+        if (textMismatch) {
+          verdict = {
+            ...verdict,
+            ...combineSignals([
+              ...verdict.signals,
+              {
+                id: 'link-text-mismatch',
+                weight: 35,
+                reason: 'The link text shows a different site than where it actually goes',
+              },
+            ]),
+          };
+        }
         uniqueLinks.set(anchor.href, verdict);
-        anchors.set(anchor.href, (anchor.textContent ?? '').trim().slice(0, 160));
+        anchors.set(anchor.href, text);
       });
 
       return {

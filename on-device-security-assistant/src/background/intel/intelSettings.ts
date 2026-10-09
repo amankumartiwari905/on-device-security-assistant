@@ -13,7 +13,7 @@ export interface IntelSettings {
   emailRepApiKey: string;
 }
 
-export const DEFAULT_INTEL_SETTINGS: IntelSettings = { mode: 'full', emailRepApiKey: '' };
+export const DEFAULT_INTEL_SETTINGS: IntelSettings = { mode: 'off', emailRepApiKey: '' };
 
 const KEY = 'intelSettings';
 

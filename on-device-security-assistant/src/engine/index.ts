@@ -28,5 +28,10 @@ export function scanPage(url: string, text: string, rules: DetectionRules = DEFA
 export { DetectionEngine } from './core/detectionEngine';
 export { combineSignals, levelFor } from './scoring/riskScorer';
 export type { Detector, ScanInput, ScanKind } from './core/detector';
-export type { DetectorTiming, ScanResult } from './core/detectionEngine';
+export type {
+  DetectorFailure,
+  DetectorFailureReason,
+  DetectorTiming,
+  ScanResult,
+} from './core/detectionEngine';
 export type { RiskLevel, Signal, Verdict } from './types';

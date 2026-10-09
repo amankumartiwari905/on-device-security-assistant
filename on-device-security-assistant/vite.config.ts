@@ -6,6 +6,9 @@ import { resolve } from 'path';
 // The content script is built separately (vite.content.config.ts) as a single IIFE.
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    conditions: ['onnxruntime-web-use-extern-wasm'],
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

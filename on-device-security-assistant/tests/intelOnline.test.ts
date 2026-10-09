@@ -8,6 +8,7 @@ import { classifyMxProvider, domainIntelSignals, mergeSignals } from '../src/bac
 import type { DomainIntel } from '../src/background/intel/domainIntel';
 import { parseRetryAfter } from '../src/background/intel/http';
 import { normalizeIntelSettings } from '../src/background/intel/intelSettings';
+import { DEFAULT_SETTINGS } from '../src/storage/settings';
 import { daysSince, findRdapBase, parseRegistrationDate } from '../src/background/intel/rdap';
 import { registrationAgeSignal, shouldEnrich } from '../src/background/intel/urlIntel';
 
@@ -201,8 +202,10 @@ describe('infrastructure', () => {
   });
 
   it('normalizes intel settings and ignores bad input', () => {
-    expect(normalizeIntelSettings(undefined)).toEqual({ mode: 'full', emailRepApiKey: '' });
+    expect(normalizeIntelSettings(undefined)).toEqual({ mode: 'off', emailRepApiKey: '' });
     expect(normalizeIntelSettings({ mode: 'domains', emailRepApiKey: '  abc  ' })).toEqual({ mode: 'domains', emailRepApiKey: 'abc' });
-    expect(normalizeIntelSettings({ mode: 'everything' }).mode).toBe('full');
+    expect(normalizeIntelSettings({ mode: 'everything' }).mode).toBe('off');
+    expect(DEFAULT_SETTINGS.onlineEmailChecks).toBe(false);
+    expect(DEFAULT_SETTINGS.onlineUrlChecks).toBe(false);
   });
 });
