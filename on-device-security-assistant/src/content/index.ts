@@ -21,48 +21,6 @@ function flagLink(a: HTMLAnchorElement, level: 'suspicious' | 'dangerous', messa
   a.title = `AI Guard: ${message}`;
 }
 
-function makeDraggable(panel: HTMLElement, handle: HTMLElement): void {
-  let dragOffset: { x: number; y: number; pointerId: number } | undefined;
-  handle.title = 'Drag to move this AI Guard panel';
-  handle.style.cursor = 'grab';
-  handle.style.touchAction = 'none';
-  handle.style.userSelect = 'none';
-
-  handle.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button'))) return;
-
-    const bounds = panel.getBoundingClientRect();
-    panel.style.left = `${bounds.left}px`;
-    panel.style.top = `${bounds.top}px`;
-    panel.style.right = 'auto';
-    panel.style.bottom = 'auto';
-    dragOffset = {
-      x: event.clientX - bounds.left,
-      y: event.clientY - bounds.top,
-      pointerId: event.pointerId,
-    };
-    handle.setPointerCapture(event.pointerId);
-    handle.style.cursor = 'grabbing';
-    event.preventDefault();
-  });
-
-  handle.addEventListener('pointermove', (event) => {
-    if (!dragOffset || event.pointerId !== dragOffset.pointerId) return;
-    const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
-    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
-    panel.style.left = `${Math.min(maxLeft, Math.max(0, event.clientX - dragOffset.x))}px`;
-    panel.style.top = `${Math.min(maxTop, Math.max(0, event.clientY - dragOffset.y))}px`;
-  });
-
-  const stopDragging = (event: PointerEvent) => {
-    if (dragOffset?.pointerId !== event.pointerId) return;
-    dragOffset = undefined;
-    handle.style.cursor = 'grab';
-  };
-  handle.addEventListener('pointerup', stopDragging);
-  handle.addEventListener('pointercancel', stopDragging);
-}
-
 function scanLinks(): void {
   document.querySelectorAll<HTMLAnchorElement>(`a[href]:not([${SCANNED}])`).forEach((a) => {
     a.setAttribute(SCANNED, '1');
@@ -136,10 +94,10 @@ function showBanner(verdict: Verdict): void {
 
   const style = document.createElement('style');
   style.textContent = `
-    .b { position: fixed; top: 12px; right: 12px; z-index: 2147483647; width: min(340px, calc(100vw - 24px));
+    .b { position: fixed; top: 12px; right: 12px; z-index: 2147483647; max-width: 340px;
          font: 13px/1.4 system-ui, sans-serif; color: #111; background: #fff;
          border: 2px solid #dc2626; border-radius: 10px; padding: 12px 14px;
-         box-shadow: 0 6px 24px rgba(0,0,0,.25); box-sizing: border-box; }
+         box-shadow: 0 6px 24px rgba(0,0,0,.25); }
     .b strong { color: #dc2626; display: block; margin-bottom: 6px; }
     .b ul { margin: 0 0 8px 18px; padding: 0; }
     .b button { cursor: pointer; border: 0; border-radius: 6px; padding: 5px 10px; background: #111; color: #fff; }
@@ -162,7 +120,6 @@ function showBanner(verdict: Verdict): void {
   box.append(title, list, btn);
   root.append(style, box);
   document.documentElement.appendChild(host);
-  makeDraggable(box, title);
 }
 
 function emailStatusLabel(status: EmailStatus): string {
@@ -267,7 +224,6 @@ function showEmailPanel(emails: EmailAssessment[]): void {
 
   panel.append(head, note, list);
   root.replaceChildren(style, panel);
-  makeDraggable(panel, head);
 }
 
 function scanPageEmails(): void {

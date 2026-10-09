@@ -42,16 +42,21 @@ label { display: block; margin: 10px 0; }
 .history li { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid #eee; word-break: break-all; }
 .popup {
   box-sizing: border-box;
-  width: 420px;
-  min-width: 420px;
-  min-height: 420px;
-  max-height: 650px;
+  width: 360px;
+  min-height: min(420px, calc(100vh - 16px));
+  max-height: calc(100vh - 16px);
   overflow-y: auto;
   padding: 14px;
+  transition: width 150ms ease, min-height 150ms ease;
 }
+.popup[data-size='0'] { width: 320px; min-height: min(320px, calc(100vh - 16px)); }
+.popup[data-size='2'] { width: min(560px, calc(100vw - 16px)); min-height: min(560px, calc(100vh - 16px)); }
 .popup-header { margin-bottom: 2px; }
 .popup-header h1 { margin: 0; }
 .popup-header-actions { display: flex; align-items: center; gap: 8px; }
+.popup-size-controls { display: flex; gap: 3px; }
+.popup-size-button { width: 26px; height: 26px; padding: 0; line-height: 1; font-size: 16px; }
+.popup-size-button:disabled { opacity: 0.45; cursor: default; }
 .popup-settings { padding: 5px 9px; font-size: 12px; }
 .popup-toggle { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; }
 .popup-status { margin: 3px 0 10px; }
@@ -87,9 +92,3 @@ label { display: block; margin: 10px 0; }
 .email-sender { margin: 5px 0 0; overflow-wrap: anywhere; }
 .email-report-details { margin-top: 8px; border-top: 1px solid #e5e7eb; padding-top: 6px; }
 .email-report-details > summary { font-weight: 600; }
-.email-detail-sections { margin: 10px 0 0; padding-left: 24px; }
-.email-detail-sections > li { padding: 8px 0 8px 4px; border-bottom: 1px solid #e5e7eb; }
-.email-detail-sections > li:last-child { border-bottom: 0; }
-.email-detail-sections h3 { margin: 0 0 6px; font-size: 13px; }
-.email-detail-sections p { overflow-wrap: anywhere; }
-.email-detail-sections > li > details { margin-top: 0; }
