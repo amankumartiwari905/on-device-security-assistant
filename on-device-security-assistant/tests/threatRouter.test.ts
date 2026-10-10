@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const { analyzePhishingTextMock } = vi.hoisted(() => ({ analyzePhishingTextMock: vi.fn() }));
-vi.mock('../src/engine/ml/modelRunner', () => ({ analyzePhishingText: analyzePhishingTextMock }));
+const { analyzePhishingTextMock, describeModelFailureMock } = vi.hoisted(() => ({
+  analyzePhishingTextMock: vi.fn(),
+  describeModelFailureMock: vi.fn((error: unknown) =>
+    `On-device phishing model unavailable: ${error instanceof Error ? error.message : String(error)}. Local detection rules remain active.`,
+  ),
+}));
+vi.mock('../src/engine/ml/modelRunner', () => ({
+  analyzePhishingText: analyzePhishingTextMock,
+  describeModelFailure: describeModelFailureMock,
+}));
 
 import { scanText } from '../src/engine';
 import { DEFAULT_DETECTION_RULES } from '../src/engine/url/rules';
@@ -12,6 +20,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   analyzePhishingTextMock.mockReset();
+  describeModelFailureMock.mockClear();
   await clearIntelCache();
 });
 
@@ -209,6 +218,7 @@ describe('routeMessageAnalysis', () => {
     expect(result.verdict.score).toBe(localVerdict.score);
     expect(result.verdict.signals).toEqual(localVerdict.signals);
     expect(result.model.status).toBe('unavailable');
+    expect(result.model.message).toContain('model asset unavailable');
     expect(result.ollama.status).toBe('analyzed');
   });
 

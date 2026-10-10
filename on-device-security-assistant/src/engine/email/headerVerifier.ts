@@ -187,15 +187,38 @@ export function analyzeEmailHeaders(rawMessage: string): EmailHeaderAssessment {
         : 'missing';
 
   const warnings = [
-    'Authentication-Results and Received-SPF values are unverified claims from the supplied headers; they can be forged and do not affect the risk score.',
+    'Authentication-Results and Received-SPF values are unverified claims from the supplied headers; they can be forged and contribute only low-confidence indicators to the risk score.',
     'Trust results only when these are the original headers from your receiving mail provider.',
     'This check does not independently validate DKIM signatures or prove control of the mailbox.',
     'Alignment uses relaxed registrable-domain comparison; the supplied headers do not establish the domain policy mode.',
   ];
-  const reportedFailures = claims.filter((claim) => ['fail', 'softfail', 'permerror'].includes(claim.result));
+  const reportedFailures = claims.filter(
+    (claim): claim is HeaderAuthClaim & { result: 'fail' | 'softfail' | 'permerror' } =>
+      ['fail', 'softfail', 'permerror'].includes(claim.result),
+  );
+  const failureWeights: Record<AuthMethod, Partial<Record<AuthResult, number>>> = {
+    spf: { fail: 20, permerror: 12, softfail: 8 },
+    dkim: { fail: 20, permerror: 12, softfail: 8 },
+    dmarc: { fail: 30, permerror: 15, softfail: 10 },
+  };
+  const strongestFailures = new Map<AuthMethod, { result: 'fail' | 'softfail' | 'permerror'; weight: number }>();
+  for (const claim of reportedFailures) {
+    const weight = failureWeights[claim.method][claim.result] ?? 0;
+    const existing = strongestFailures.get(claim.method);
+    if (weight > 0 && (!existing || weight > existing.weight)) {
+      strongestFailures.set(claim.method, { result: claim.result, weight });
+    }
+  }
+  for (const [method, failure] of strongestFailures) {
+    signals.push({
+      id: `reported-${method}-failure`,
+      weight: failure.weight,
+      reason: `Supplied headers report ${method.toUpperCase()} ${failure.result}; verify this claim with your receiving mail provider`,
+    });
+  }
   if (reportedFailures.length > 0) {
     warnings.push(
-      `Supplied headers report ${[...new Set(reportedFailures.map((claim) => `${claim.method.toUpperCase()} ${claim.result}`))].join(', ')}; verify these claims with your receiving mail provider.`,
+      `Supplied headers report ${[...new Set(reportedFailures.map((claim) => `${claim.method.toUpperCase()} ${claim.result}`))].join(', ')}; these unverified claims contribute only low-confidence risk indicators.`,
     );
   }
   if (headers.has('dkim-signature') && !claims.some((claim) => claim.method === 'dkim')) {

@@ -35,7 +35,7 @@ describe('email header verification', () => {
     expect(result.signals).toEqual([]);
   });
 
-  it('keeps authentication failures as unverified warnings, scoring only sender mismatches', () => {
+  it('scores reported authentication failures conservatively as unverified indicators', () => {
     const result = analyzeEmailHeaders([
       'From: alerts@bank.example',
       'Return-Path: <bounce@unrelated.example>',
@@ -46,28 +46,49 @@ describe('email header verification', () => {
     expect(result.dmarcStatus).toBe('reported-fail');
     expect(result.signals.map((signal) => signal.id)).toEqual(expect.arrayContaining([
       'return-path-mismatch',
+      'reported-spf-failure',
+      'reported-dkim-failure',
+      'reported-dmarc-failure',
     ]));
-    expect(result.signals.map((signal) => signal.id)).not.toEqual(expect.arrayContaining([
-      'header-spf-failure',
-      'header-dkim-failure',
-      'header-dmarc-failure',
-    ]));
-    expect(result.riskScore).toBe(15);
+    expect(result.riskScore).toBeGreaterThan(0);
+    expect(result.riskScore).toBeLessThan(70);
     expect(result.warnings.some((warning) => warning.includes('SPF fail, DKIM fail, DMARC fail'))).toBe(true);
   });
 
-  it('records Received-SPF failures as claims and warnings, not scored evidence', () => {
+  it('scores duplicate Received-SPF failures once as low-confidence evidence', () => {
     const result = analyzeEmailHeaders([
       'From: sender@example.com',
       'Received-SPF: softfail (mx.receiver.example: domain of sender@other.example does not designate permitted sender)',
+      'Received-SPF: softfail (mx.receiver.example: duplicate untrusted result)',
     ].join('\n'));
 
-    expect(result.claims).toMatchObject([
-      { method: 'spf', result: 'softfail', source: 'Received-SPF', authservId: 'mx.receiver.example' },
-    ]);
+    expect(result.claims).toHaveLength(2);
+    expect(result.claims[0]).toMatchObject({
+      method: 'spf',
+      result: 'softfail',
+      source: 'Received-SPF',
+      authservId: 'mx.receiver.example',
+    });
     expect(result.dmarcStatus).toBe('missing');
-    expect(result.signals.map((signal) => signal.id)).not.toContain('header-spf-failure');
+    expect(result.signals.filter((signal) => signal.id === 'reported-spf-failure')).toHaveLength(1);
+    expect(result.riskScore).toBe(8);
     expect(result.warnings.some((warning) => warning.includes('SPF softfail'))).toBe(true);
+  });
+
+  it('raises reported DMARC failure with SPF softfail above the low-risk range', () => {
+    const result = analyzeEmailHeaders([
+      'From: noreply@example.com',
+      'Return-Path: <noreply@example.com>',
+      'Received-SPF: softfail (google.com: sender not authorized)',
+      'Authentication-Results: mx.google.com; spf=softfail smtp.mailfrom=example.com; dmarc=fail header.from=example.com',
+    ].join('\r\n'));
+
+    expect(result.claims.map(({ method, result: claim }) => `${method}:${claim}`)).toContain('dmarc:fail');
+    expect(result.signals.map(({ id }) => id)).toEqual(expect.arrayContaining([
+      'reported-spf-failure',
+      'reported-dmarc-failure',
+    ]));
+    expect(result.riskScore).toBe(36);
   });
 
   it('ignores body text after the header separator and warns when results are missing', () => {

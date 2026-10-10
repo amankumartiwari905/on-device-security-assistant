@@ -41,6 +41,8 @@
   "host_permissions": [
     "http://localhost:11434/*",
     "http://127.0.0.1:11434/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
     "https://emailrep.io/*",
     "https://dns.google/*",
     "https://safebrowsing.googleapis.com/*",

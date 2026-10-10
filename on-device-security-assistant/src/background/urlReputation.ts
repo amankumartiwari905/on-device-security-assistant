@@ -36,18 +36,39 @@ async function responseJson(response: Response, provider: string): Promise<unkno
 }
 
 async function checkGoogleSafeBrowsing(url: string, apiKey: string): Promise<ProviderOutcome> {
-  const endpoint = new URL('https://safebrowsing.googleapis.com/v5/urls:search');
+  // Use Safe Browsing v4 threatMatches:find for standard JSON payload; also support v5 mock shape
+  const endpoint = new URL('https://safebrowsing.googleapis.com/v4/threatMatches:find');
   endpoint.searchParams.set('key', apiKey);
-  endpoint.searchParams.set('urls', url);
-  endpoint.searchParams.append('threatTypes', 'MALWARE');
-  endpoint.searchParams.append('threatTypes', 'SOCIAL_ENGINEERING');
-  endpoint.searchParams.append('threatTypes', 'UNWANTED_SOFTWARE');
-  const data = await responseJson(await request(endpoint.href), 'Google Safe Browsing');
+  const response = await request(endpoint.href, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      client: { clientId: 'ai-guard', clientVersion: '0.1.0' },
+      threatInfo: {
+        threatTypes: ['MALWARE', 'SOCIAL_ENGINEERING', 'UNWANTED_SOFTWARE', 'POTENTIALLY_HARMFUL_APPLICATION'],
+        platformTypes: ['ANY_PLATFORM'],
+        threatEntryTypes: ['URL'],
+        threatEntries: [{ url }],
+      },
+    }),
+  });
+  const data = await responseJson(response, 'Google Safe Browsing');
   if (!isRecord(data)) throw new Error('Google Safe Browsing returned an invalid response.');
-  const threats = Array.isArray(data.threats) ? data.threats : [];
-  return threats.length > 0
-    ? { status: 'listed', detail: `Reported as a threat (${threats.length} match${threats.length === 1 ? '' : 'es'}).` }
-    : { status: 'not-listed', detail: 'No match in this lookup.' };
+  const matches = Array.isArray(data.matches)
+    ? data.matches
+    : Array.isArray(data.threats)
+      ? data.threats
+      : [];
+  if (matches.length > 0) {
+    const threats = matches
+      .map((m) => (isRecord(m) && typeof m.threatType === 'string' ? m.threatType : ''))
+      .filter(Boolean);
+    const detail = threats.length > 0
+      ? `Reported as a threat: ${[...new Set(threats)].join(', ')} (${matches.length} match${matches.length === 1 ? '' : 'es'}).`
+      : `Reported as a threat (${matches.length} match${matches.length === 1 ? '' : 'es'}).`;
+    return { status: 'listed', detail };
+  }
+  return { status: 'not-listed', detail: 'No match in this lookup.' };
 }
 
 function base64Url(value: string): string {
@@ -59,12 +80,13 @@ function base64Url(value: string): string {
 
 async function checkVirusTotal(url: string, apiKey: string): Promise<ProviderOutcome> {
   const encoded = base64Url(url);
-  const data = await responseJson(
-    await request(`https://www.virustotal.com/api/v3/urls/${encoded}`, {
-      headers: { 'x-apikey': apiKey, Accept: 'application/json' },
-    }),
-    'VirusTotal',
-  );
+  const response = await request(`https://www.virustotal.com/api/v3/urls/${encoded}`, {
+    headers: { 'x-apikey': apiKey, Accept: 'application/json' },
+  });
+  if (response.status === 404) {
+    return { status: 'not-listed', detail: 'URL not found in VirusTotal database (not analyzed).' };
+  }
+  const data = await responseJson(response, 'VirusTotal');
   if (!isRecord(data) || !isRecord(data.data) || !isRecord(data.data.attributes) ||
       !isRecord(data.data.attributes.last_analysis_stats)) {
     return { status: 'unknown', detail: 'No completed analysis is available for this URL.' };
@@ -82,22 +104,37 @@ async function checkVirusTotal(url: string, apiKey: string): Promise<ProviderOut
 
 async function checkUrlhaus(url: string, apiKey: string): Promise<ProviderOutcome> {
   const body = new URLSearchParams({ url });
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Accept: 'application/json',
+  };
+  if (apiKey && apiKey.trim()) {
+    headers['Auth-Key'] = apiKey.trim();
+    headers['auth-key'] = apiKey.trim();
+  }
   const response = await request('https://urlhaus-api.abuse.ch/v1/url/', {
     method: 'POST',
-    headers: { 'auth-key': apiKey, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    headers,
     body,
   });
   const data = await responseJson(response, 'URLhaus');
   if (!isRecord(data) || typeof data.query_status !== 'string') {
     throw new Error('URLhaus returned an invalid response.');
   }
-  if (data.query_status === 'ok') return { status: 'listed', detail: 'URL is present in the URLhaus database.' };
+  if (data.query_status === 'ok') {
+    const threat = typeof data.threat === 'string' ? ` (${data.threat})` : '';
+    const status = typeof data.url_status === 'string' ? ` [${data.url_status}]` : '';
+    return { status: 'listed', detail: `URL is present in the URLhaus database${threat}${status}.` };
+  }
   if (data.query_status === 'no_results') return { status: 'not-listed', detail: 'No match in this lookup.' };
   return { status: 'unknown', detail: `URLhaus query status: ${data.query_status.slice(0, 80)}.` };
 }
 
 async function checkPhishTank(url: string, appKey: string): Promise<ProviderOutcome> {
-  const body = new URLSearchParams({ url, format: 'json', app_key: appKey });
+  if (!appKey || !appKey.trim()) {
+    return { status: 'not-configured', detail: 'PhishTank API key not configured (optional, can be added in Settings).' };
+  }
+  const body = new URLSearchParams({ url, format: 'json', app_key: appKey.trim() });
   const data = await responseJson(await request('https://checkurl.phishtank.com/checkurl/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
@@ -124,7 +161,14 @@ async function providerResult(
         ? config.urlhausAuthKey
         : config.phishTankAppKey;
   if (typeof apiKey !== 'string' || !apiKey.trim()) {
-    return { provider, status: 'not-configured', detail: 'Add an API key in Settings to enable this provider.' };
+    if (provider === 'phishTank') {
+      return { provider, status: 'not-configured', detail: 'PhishTank API key not configured (optional, can be added in Settings).' };
+    }
+    return {
+      provider,
+      status: 'not-configured',
+      detail: `Add an API key in Settings to enable ${provider === 'googleSafeBrowsing' ? 'Google Safe Browsing' : provider === 'virusTotal' ? 'VirusTotal' : 'URLhaus'}.`,
+    };
   }
 
   try {

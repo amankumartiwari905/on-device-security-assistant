@@ -1,6 +1,6 @@
 import { combineSignals, scanText } from '../engine';
 import type { Signal, Verdict } from '../engine';
-import { analyzePhishingText } from '../engine/ml/modelRunner';
+import { analyzePhishingText, describeModelFailure } from '../engine/ml/modelRunner';
 import type { PhishingModelPrediction } from '../engine/ml/modelRunner';
 import type { AnalysisIntent, ThreatExplanation } from '../shared/messages';
 import type { DetectionRules } from '../engine/url/rules';
@@ -251,7 +251,9 @@ export async function routeMessageAnalysis(
       ...modelResult,
     };
   } catch (error) {
-    console.warn('[AI Guard] On-device phishing model unavailable; using local scan.', error);
+    const message = describeModelFailure(error);
+    console.warn(`[AI Guard] ${message}`, error);
+    model.message = message;
   }
 
   const trigger = intent === 'explain'

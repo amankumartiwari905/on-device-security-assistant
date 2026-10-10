@@ -36,8 +36,9 @@ artifacts, use Python 3.13 or earlier, install `ml/requirements.txt`, then run:
 
 The export validates ONNX probabilities against the sklearn model before
 writing the browser asset. To validate the browser model artifact directly,
-run `npm run test:model`. The browser includes the model and ONNX Runtime Web
-WASM asset in `dist/`; no separate inference service is required.
+run `npm run test:model`. The browser build includes the model, bundled ONNX
+Runtime Web loader, and WASM asset in `dist/`; no separate inference service is
+required.
 
 Qwen is triggered automatically when the combined risk score is elevated
 (30/100 or higher), or on any score when the user selects **Why is this
@@ -91,8 +92,12 @@ The report compares visible link text with each target URL, and displays SPF,
 DKIM, DMARC and registrable-domain alignment claims when the supplied headers
 contain them. These results are not independently verified: headers can be
 forged, and the extension does not validate DKIM signatures or prove mailbox
-ownership. Authentication claims and their reported alignment do not affect
-the risk score; only local sender and address indicators are scored.
+ownership. Reported authentication failures contribute capped, low-confidence
+risk indicators so they can inform the score without being treated as verified
+facts. A reported DMARC failure receives a stronger caution weight than an SPF
+softfail, so their combination is not presented as negligible risk. Only trust
+authentication results taken from the original headers at your receiving mail
+provider.
 Return-Path differences are weak signals, not an automatic malicious verdict.
 The parser enforces the 1 MB limit in bytes even when called outside the popup.
 Parsing, extraction, and local risk checks do not upload the message.

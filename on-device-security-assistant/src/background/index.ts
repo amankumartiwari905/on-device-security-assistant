@@ -128,13 +128,10 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, sendResponse) => {
 
     void getSettings()
       .then((settings) => {
-        if (!settings.onlineUrlChecks) throw new Error('Online URL reputation checks are disabled in Settings.');
-        return getIntelSettings().then((intelSettings) => {
-          if (intelSettings.mode !== 'full') {
-            throw new Error('Full URL reputation checks require Full privacy mode.');
-          }
-          return checkUrlReputations(msg.urls, settings);
-        });
+        if (!settings.onlineUrlChecks) {
+          throw new Error('Online URL reputation checks are disabled in Settings. Enable "Allow manual URL lookups" in Settings to use this.');
+        }
+        return checkUrlReputations(msg.urls, settings);
       })
       .then((results) => sendResponse({ results, message: 'Online URL reputation lookup complete.' }))
       .catch((error: unknown) => {

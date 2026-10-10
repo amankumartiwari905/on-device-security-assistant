@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { combineSignals, scanUrl } from '../../engine';
 import type { Verdict } from '../../engine';
-import { analyzePhishingText } from '../../engine/ml/modelRunner';
+import { analyzePhishingText, describeModelFailure } from '../../engine/ml/modelRunner';
 import type { PhishingModelPrediction } from '../../engine/ml/modelRunner';
 import { getSettings, saveSettings } from '../../storage/settings';
 import { getDetectionRules } from '../../storage/detectionRules';
@@ -17,6 +17,7 @@ import { parseEml } from '../../engine/email/emlParser';
 import type { ParsedEmail } from '../../engine/email/emlParser';
 import type { CheckUrlReputationResponse } from '../../shared/messages';
 import type { UrlReputationProvider, UrlReputationReport } from '../../shared/urlReputation';
+import { extractUrls } from '../../engine/nlp/linkAnalysis';
 import { VerdictCard } from '../components/VerdictCard';
 
 async function inspectPageLinks(tabId: number, rules: DetectionRules): Promise<PageLinkAssessment[]> {
@@ -61,12 +62,20 @@ export function Popup() {
   const [onlineUrlChecks, setOnlineUrlChecks] = useState(false);
   const [tabUrl, setTabUrl] = useState('');
   const [pageVerdict, setPageVerdict] = useState<Verdict | null>(null);
+  const [pageModel, setPageModel] = useState<Extract<AnalyzeMessageResponse, { verdict: Verdict }>['model'] | null>(null);
+  const [checkingPageModel, setCheckingPageModel] = useState(false);
+  const [pageUrlReports, setPageUrlReports] = useState<Record<string, UrlReputationReport> | null>(null);
+  const [pageUrlError, setPageUrlError] = useState<string | null>(null);
+  const [checkingPageUrl, setCheckingPageUrl] = useState(false);
   const [pageLinks, setPageLinks] = useState<PageLinkAssessment[] | null>(null);
   const [pageLinksError, setPageLinksError] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [textVerdict, setTextVerdict] = useState<Verdict | null>(null);
   const [textModel, setTextModel] = useState<Extract<AnalyzeMessageResponse, { verdict: Verdict }>['model'] | null>(null);
   const [textExplanation, setTextExplanation] = useState<ThreatExplanation | null>(null);
+  const [messageUrlReports, setMessageUrlReports] = useState<Record<string, UrlReputationReport> | null>(null);
+  const [messageUrlError, setMessageUrlError] = useState<string | null>(null);
+  const [checkingMessageUrls, setCheckingMessageUrls] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -109,6 +118,33 @@ export function Popup() {
         if (tab?.url && /^https?:/i.test(tab.url)) {
           setTabUrl(tab.url);
           setPageVerdict(scanUrl(tab.url, rules));
+
+          // Run the on-device ML phishing model for this website
+          setCheckingPageModel(true);
+          void analyzePhishingText(tab.url)
+            .then((prediction) => {
+              if (!cancelled) {
+                setPageModel({
+                  status: 'analyzed',
+                  message: 'On-device ML phishing model analysis complete.',
+                  ...prediction,
+                });
+              }
+            })
+            .catch((modelError: unknown) => {
+              if (!cancelled) {
+                const message = describeModelFailure(modelError);
+                console.warn('[AI Guard] website ML prediction failed', modelError);
+                setPageModel({
+                  status: 'unavailable',
+                  message,
+                });
+              }
+            })
+            .finally(() => {
+              if (!cancelled) setCheckingPageModel(false);
+            });
+
           const tabId = tab.id;
           if (tabId !== undefined) {
             const useScriptingFallback = (cause: unknown) => {
@@ -215,10 +251,11 @@ export function Popup() {
           ...prediction,
         });
       } catch (error) {
-        console.warn('[AI Guard] On-device email model unavailable; using local scan.', error);
+        const message = describeModelFailure(error);
+        console.warn(`[AI Guard] ${message}`, error);
         setEmailModel({
           status: 'unavailable',
-          message: 'On-device phishing model unavailable; email indicators remain available.',
+          message,
         });
       }
       setUrlReports(null);
@@ -275,6 +312,54 @@ export function Popup() {
     }
   };
 
+  const checkPageUrlOnline = async () => {
+    if (!tabUrl) return;
+    setCheckingPageUrl(true);
+    setPageUrlReports(null);
+    setPageUrlError(null);
+    try {
+      const response: CheckUrlReputationResponse = await chrome.runtime.sendMessage({
+        type: 'CHECK_URL_REPUTATION',
+        urls: [tabUrl],
+      });
+      if ('error' in response) setPageUrlError(response.error);
+      else setPageUrlReports(response.results);
+    } catch (error) {
+      console.error('[AI Guard] could not check website URL reputation', error);
+      setPageUrlError('Could not reach the AI Guard service worker. Reload the extension and try again.');
+    } finally {
+      setCheckingPageUrl(false);
+    }
+  };
+
+  const checkMessageLinksOnline = async () => {
+    const urls = [...new Set(extractUrls(text))].slice(0, 5);
+    if (!urls.length) return;
+    setCheckingMessageUrls(true);
+    setMessageUrlReports(null);
+    setMessageUrlError(null);
+    try {
+      const response: CheckUrlReputationResponse = await chrome.runtime.sendMessage({
+        type: 'CHECK_URL_REPUTATION',
+        urls,
+      });
+      if ('error' in response) setMessageUrlError(response.error);
+      else setMessageUrlReports(response.results);
+    } catch (error) {
+      console.error('[AI Guard] could not check message links reputation', error);
+      setMessageUrlError('Could not reach the AI Guard service worker. Reload the extension and try again.');
+    } finally {
+      setCheckingMessageUrls(false);
+    }
+  };
+
+  const enableOnlineChecks = async () => {
+    setOnlineUrlChecks(true);
+    await saveSettings({ onlineUrlChecks: true });
+  };
+
+  const detectedMessageUrls = [...new Set(extractUrls(text))].slice(0, 5);
+
   return (
     <div className="popup" data-size={popupSize}>
       <div className="row popup-header">
@@ -321,7 +406,35 @@ export function Popup() {
       ) : pageVerdict ? (
         <>
           <div className="muted popup-url" title={tabUrl}>{tabUrl}</div>
+          {checkingPageModel && <p className="muted">Running ML analysis on this website...</p>}
+          {pageModel && <ModelPrediction model={pageModel} title="Website ML prediction" />}
           <VerdictCard verdict={pageVerdict} />
+
+          <div style={{ marginTop: 8 }}>
+            <button
+              className="secondary"
+              onClick={() => void checkPageUrlOnline()}
+              disabled={checkingPageUrl || !tabUrl || !onlineUrlChecks}
+            >
+              {checkingPageUrl ? 'Checking online reputation...' : 'Check online reputation (URLhaus, VirusTotal, Safe Browsing)'}
+            </button>
+            {!onlineUrlChecks && (
+              <p className="muted" style={{ marginTop: 4 }}>
+                Online lookups disabled in Settings.{' '}
+                <button
+                  type="button"
+                  className="secondary"
+                  style={{ padding: '2px 6px', fontSize: 11 }}
+                  onClick={() => void enableOnlineChecks()}
+                >
+                  Enable online checks
+                </button>
+              </p>
+            )}
+            {pageUrlError && <p className="muted" role="alert">{pageUrlError}</p>}
+            {pageUrlReports && <UrlReputationResults reports={pageUrlReports} />}
+          </div>
+
           {pageLinksError && <p className="muted" role="status">{pageLinksError}</p>}
           {pageLinks && pageLinks.length > 0 && (
             <section className="page-links" aria-label="Suspicious links on this page">
@@ -358,6 +471,8 @@ export function Popup() {
               setTextVerdict(null);
               setTextModel(null);
               setTextExplanation(null);
+              setMessageUrlReports(null);
+              setMessageUrlError(null);
               setAnalysisStatus(null);
             }}
           />
@@ -369,7 +484,7 @@ export function Popup() {
           {analysisStatus && <p className="muted" role="status">{analysisStatus}</p>}
           {textVerdict && (
             <>
-              {textModel && <ModelPrediction model={textModel} />}
+              {textModel && <ModelPrediction model={textModel} title="Message ML prediction" />}
               <VerdictCard verdict={textVerdict} />
               <button
                 className="secondary"
@@ -378,6 +493,32 @@ export function Popup() {
               >
                 {analyzingMessage ? 'Explaining...' : 'Explain result'}
               </button>
+              {detectedMessageUrls.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    className="secondary"
+                    onClick={() => void checkMessageLinksOnline()}
+                    disabled={checkingMessageUrls || !onlineUrlChecks}
+                  >
+                    {checkingMessageUrls ? 'Checking links...' : `Check message links online (${detectedMessageUrls.length})`}
+                  </button>
+                  {!onlineUrlChecks && (
+                    <p className="muted" style={{ marginTop: 4 }}>
+                      Online lookups disabled.{' '}
+                      <button
+                        type="button"
+                        className="secondary"
+                        style={{ padding: '2px 6px', fontSize: 11 }}
+                        onClick={() => void enableOnlineChecks()}
+                      >
+                        Enable online checks
+                      </button>
+                    </p>
+                  )}
+                  {messageUrlError && <p className="muted" role="alert">{messageUrlError}</p>}
+                  {messageUrlReports && <UrlReputationResults reports={messageUrlReports} />}
+                </div>
+              )}
               {textExplanation && (
                 <section className="card" aria-label="AI explanation">
                   <p>{textExplanation.summary}</p>
@@ -425,13 +566,25 @@ export function Popup() {
           {emailError && <p className="muted" role="alert">{emailError}</p>}
           {emailAnalysis && (
             <>
-              {emailModel && <ModelPrediction model={emailModel} />}
+              {emailModel && <ModelPrediction model={emailModel} title="Email ML prediction" />}
               <EmailAnalysisResult email={emailAnalysis} />
               <button className="secondary" onClick={() => void checkEmailLinks()}
                 disabled={!onlineUrlChecks || checkingUrls || emailAnalysis.links.length === 0}>
                 {checkingUrls ? 'Checking links...' : `Check links online (${Math.min(emailAnalysis.links.length, 5)})`}
               </button>
-              {!onlineUrlChecks && <p className="muted">Turn on online link checks in Settings to use this.</p>}
+              {!onlineUrlChecks && (
+                <p className="muted" style={{ marginTop: 4 }}>
+                  Turn on online link checks in Settings to use this.{' '}
+                  <button
+                    type="button"
+                    className="secondary"
+                    style={{ padding: '2px 6px', fontSize: 11 }}
+                    onClick={() => void enableOnlineChecks()}
+                  >
+                    Enable
+                  </button>
+                </p>
+              )}
               {urlError && <p className="muted" role="alert">{urlError}</p>}
               {urlReports && <UrlReputationResults reports={urlReports} />}
             </>
@@ -467,19 +620,23 @@ export function Popup() {
 
 function ModelPrediction({
   model,
+  title = 'ML phishing model',
 }: {
   model: Extract<AnalyzeMessageResponse, { verdict: Verdict }>['model'];
+  title?: string;
 }) {
   if (model.status !== 'analyzed') {
     return (
       <section className="card model-prediction" aria-label="ML prediction">
-        <strong>ML prediction</strong>
+        <strong>{title}</strong>
         <p className="muted">{model.message}</p>
+        <p className="muted model-note">No ML score is available. Local detection rules remain active.</p>
       </section>
     );
   }
 
-  const probability = Math.round(model.probability * 100);
+  const percentage = (model.probability * 100).toFixed(2);
+  const score = Math.round(model.probability * 100);
   const predictionLabel = {
     LEGITIMATE: 'Likely legitimate',
     SUSPICIOUS: 'Suspicious',
@@ -489,20 +646,29 @@ function ModelPrediction({
   return (
     <section className={`card model-prediction model-${model.risk.toLowerCase()}`} aria-label="ML prediction">
       <div className="row">
-        <strong>ML prediction</strong>
-        <strong>{predictionLabel}</strong>
+        <strong>{title}</strong>
+        <strong className={`page-link-level ${model.risk === 'HIGH' ? 'dangerous' : model.risk === 'SUSPICIOUS' ? 'suspicious' : 'safe'}`}>{predictionLabel}</strong>
       </div>
       <div className="row model-probability-label">
-        <span>Estimated phishing probability</span>
-        <strong>{probability}%</strong>
+        <span>ML phishing probability</span>
+        <strong>{percentage}% ({model.probability.toFixed(4)})</strong>
       </div>
-      <progress
-        className="model-probability"
-        value={probability}
-        max={100}
-        aria-label="Estimated phishing probability"
-      />
-      <p className="muted model-note">Model estimate, not proof that a message is malicious.</p>
+      <div className="row" style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
+        <span>Risk score equivalent</span>
+        <span>{score}/100</span>
+      </div>
+      <div
+        className="model-score-track"
+        role="meter"
+        aria-label="ML phishing score"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={score}
+        aria-valuetext={`${percentage}% phishing probability, ${predictionLabel}`}
+      >
+        <div className="model-score-fill" style={{ width: `${score}%` }} />
+      </div>
+      <p className="muted model-note">On-device ML estimate trained on phishing signals (calibrated SVM + TF-IDF).</p>
     </section>
   );
 }
@@ -669,17 +835,46 @@ function UrlReputationResults({ reports }: { reports: Record<string, UrlReputati
         const combined = combineSignals([...local.signals, ...providerSignals]);
         return (
           <div key={url} className="url-report">
-            <p className="muted">{url}</p>
-            <p><strong>Local URL risk: {local.score}/100</strong> · <strong>with provider matches: {combined.score}/100</strong></p>
+            <p className="muted" style={{ wordBreak: 'break-all' }}>{url}</p>
+            <p>
+              <strong>Local URL risk: {local.score}/100</strong>
+              {providerSignals.length > 0 && (
+                <> · <strong style={{ color: '#dc2626' }}>with provider matches: {combined.score}/100</strong></>
+              )}
+            </p>
             <ul className="header-claims">
               {report.providers.map(({ provider, status, detail }) => (
-                <li key={provider}><strong>{providerNames[provider]}:</strong> {status} — {detail}</li>
+                <li key={provider}>
+                  <strong>{providerNames[provider]}:</strong>{' '}
+                  <span
+                    style={{
+                      fontWeight: 600,
+                      color:
+                        status === 'listed'
+                          ? '#dc2626'
+                          : status === 'not-listed'
+                            ? '#16a34a'
+                            : '#666',
+                    }}
+                  >
+                    {status === 'listed'
+                      ? '⚠️ LISTED (Threat detected)'
+                      : status === 'not-listed'
+                        ? '✓ Not listed'
+                        : status === 'not-configured'
+                          ? '⚪ Not configured (optional)'
+                          : status}
+                  </span>
+                  {' — '}{detail}
+                </li>
               ))}
             </ul>
           </div>
         );
       })}
-      <p className="muted">A provider hit adds a risk signal; a no-match adds no safety points. Scores are heuristic, and “not listed” or unavailable does not mean safe.</p>
+      <p className="muted" style={{ marginTop: 6, fontSize: 11 }}>
+        Integrated providers: Google Safe Browsing, VirusTotal, URLhaus, PhishTank. Threats detected by any provider add critical risk signals.
+      </p>
     </section>
   );
 }
